@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "openpnp-sim": {
+      "command": "ai-bridge/.venv/Scripts/python.exe",
+      "args": ["ai-bridge/server.py"],
+      "env": { "OPENPNP_CONFIG_DIR": "${USERPROFILE}/openpnp-sim" }
+    },
+    "openpnp": {
+      "command": "ai-bridge/.venv/Scripts/python.exe",
+      "args": ["ai-bridge/server.py"],
+      "env": { "OPENPNP_CONFIG_DIR": "${USERPROFILE}/.openpnp2" }
+    }
+  }
+}
