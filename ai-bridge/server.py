@@ -129,5 +129,99 @@ def pick_from_feeder(
     return json.dumps(_call("POST", "/feeder/pick", body=body), ensure_ascii=False, indent=1)
 
 
+@mcp.tool()
+def home_machine(reason: str, confirm: bool = False) -> str:
+    """Enable the machine if needed and home it, like the power and home buttons.
+
+    MOVES THE MACHINE: all axes move to their home positions or switches. First call
+    without confirm to get the plan, ask the user (remind them nothing may be in the
+    way of the head), and only then call again with confirm=true. Afterwards all heads
+    are lifted to Safe Z.
+    """
+    body = {"confirm": confirm, "reason": reason}
+    return json.dumps(_call("POST", "/machine/home", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def discard_part(reason: str, confirm: bool = False, nozzle_id: str | None = None) -> str:
+    """Drop whatever is on a nozzle at the machine's discard location, like the discard button.
+
+    Works even if OpenPnP thinks the nozzle is empty, e.g. after a failed pick left a
+    part on it. MOVES THE MACHINE: first call without confirm to get the plan, ask the
+    user, and only then call again with confirm=true. nozzle_id defaults to the nozzle
+    selected in the GUI. Afterwards all heads are lifted to Safe Z.
+    """
+    body = {"confirm": confirm, "nozzleId": nozzle_id, "reason": reason}
+    return json.dumps(_call("POST", "/nozzle/discard", body=body), ensure_ascii=False, indent=1)
+
+
+def _region(x_min, y_min, x_max, y_max):
+    values = (x_min, y_min, x_max, y_max)
+    if all(v is None for v in values):
+        return None
+    if any(v is None for v in values):
+        raise ValueError("Give all of x_min, y_min, x_max and y_max, or none.")
+    return {"xMin": x_min, "yMin": y_min, "xMax": x_max, "yMax": y_max}
+
+
+@mcp.tool()
+def scan_bed_map(
+    reason: str,
+    confirm: bool = False,
+    x_min: float | None = None,
+    y_min: float | None = None,
+    x_max: float | None = None,
+    y_max: float | None = None,
+) -> str:
+    """Scan the machine bed with the top camera and stitch the frames into the bed map.
+
+    Without a region the whole bed is scanned and the map replaced. With a region
+    (machine coordinates in mm) only that part of the existing map is updated.
+    MOVES THE MACHINE: first call without confirm to get the plan (number of camera
+    positions and area), ask the user, and only then call again with confirm=true.
+    The scan runs in the background; poll get_bed_map_scan_status until running is
+    false. Afterwards all heads are lifted to Safe Z.
+    """
+    body = {
+        "confirm": confirm,
+        "region": _region(x_min, y_min, x_max, y_max),
+        "reason": reason,
+    }
+    return json.dumps(_call("POST", "/bedmap/scan", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def get_bed_map_scan_status() -> str:
+    """Progress of the current or last bed map scan: running, done/total frames, and the result
+    (error, nozzlesAfterFailure, safeZAfter) once it has finished."""
+    return json.dumps(_call("GET", "/bedmap/scan"), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def cancel_bed_map_scan() -> str:
+    """Stop a running bed map scan after the current frame. What was scanned so far is kept."""
+    return json.dumps(_call("POST", "/bedmap/scan/cancel", body={}), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def get_bed_map(
+    x_min: float | None = None,
+    y_min: float | None = None,
+    x_max: float | None = None,
+    y_max: float | None = None,
+    max_size: int | None = None,
+) -> list:
+    """Get the stitched bed map image, whole or a region (machine coordinates in mm).
+
+    Returns the image and imageArea/imageMmPerPixel to convert image pixels to machine
+    coordinates: x = xMin + px * imageMmPerPixel, y = yMax - py * imageMmPerPixel
+    (up in the image is +y). max_size limits the longest image side (default and
+    maximum 1600 px); ask for a smaller region to see more detail. Does not move the machine.
+    """
+    query = _region(x_min, y_min, x_max, y_max) or {}
+    query["maxSize"] = max_size
+    return _with_images(_call("GET", "/bedmap", query))
+
+
 if __name__ == "__main__":
     mcp.run()

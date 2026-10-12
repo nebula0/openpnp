@@ -20,7 +20,10 @@
 package org.openpnp.ai;
 
 import java.awt.Graphics2D;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.geom.Point2D;
+import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -43,6 +46,7 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.imageio.ImageIO;
 import javax.swing.SwingUtilities;
@@ -50,6 +54,8 @@ import javax.swing.SwingUtilities;
 import org.apache.commons.io.IOUtils;
 import org.opencv.core.Mat;
 import org.opencv.core.RotatedRect;
+import org.openpnp.bedmap.BedMap;
+import org.openpnp.bedmap.BedMapScanner;
 import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
@@ -63,6 +69,7 @@ import org.openpnp.spi.Feeder;
 import org.openpnp.spi.Head;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.Nozzle;
+import org.openpnp.util.Cycles;
 import org.openpnp.util.MovableUtils;
 import org.openpnp.util.OpenCvUtils;
 import org.openpnp.util.VisionUtils;
@@ -97,6 +104,7 @@ public class AiBridgeServer {
 
     private static final long MACHINE_TASK_TIMEOUT_S = 180;
     private static final int MAX_IMAGE_DIMENSION = 800;
+    private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
 
     private static AiBridgeServer instance;
 
@@ -106,6 +114,11 @@ public class AiBridgeServer {
     private final Gson gson = new GsonBuilder().serializeNulls()
                                                .setPrettyPrinting()
                                                .create();
+    private final AtomicBoolean bedMapScanCancel = new AtomicBoolean();
+    /**
+     * State of the current or last bed map scan, null if there was none. Guarded by this.
+     */
+    private JsonObject bedMapScanState;
 
     /**
      * Starts the server if the aiBridge.port system property is set. Call once the Configuration
@@ -210,6 +223,10 @@ public class AiBridgeServer {
                     return getFeeders(query.get("partId"));
                 case "/nozzles":
                     return getNozzles();
+                case "/bedmap":
+                    return getBedMap(query);
+                case "/bedmap/scan":
+                    return getBedMapScanState();
             }
         }
         else if (method.equals("POST")) {
@@ -219,6 +236,14 @@ public class AiBridgeServer {
                     return inspectFeeder(body);
                 case "/feeder/pick":
                     return pickFeeder(body);
+                case "/machine/home":
+                    return homeMachine(body);
+                case "/nozzle/discard":
+                    return discardPart(body);
+                case "/bedmap/scan":
+                    return scanBedMap(body);
+                case "/bedmap/scan/cancel":
+                    return cancelBedMapScan();
             }
         }
         return null;
@@ -307,9 +332,8 @@ public class AiBridgeServer {
                 // or lost steps this may differ from reality until the machine is homed again.
                 Length z = nozzle.getLocation()
                                  .getLengthZ();
-                n.addProperty("z", Math.round(z.convertToUnits(LengthUnit.Millimeters)
-                                               .getValue()
-                        * 1000) / 1000.0);
+                n.addProperty("z", round(z.convertToUnits(LengthUnit.Millimeters)
+                                          .getValue()));
                 n.addProperty("atSafeZ", nozzle.isInSafeZZone(z));
                 nozzles.add(n);
             }
@@ -497,6 +521,317 @@ public class AiBridgeServer {
         });
     }
 
+    /**
+     * Enables the machine if needed and homes it, like the power and home buttons.
+     *
+     * Body: {confirm}
+     */
+    private JsonObject homeMachine(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        JsonObject gate = gate(homeRefusal(machine), body,
+                (machine.isEnabled() ? "" : "Enable the machine, then home it. ")
+                        + "Homing moves all axes to their home positions or switches. "
+                        + "Make sure nothing is in the way of the head before confirming.");
+        if (gate != null) {
+            return gate;
+        }
+        if (!machine.isEnabled()) {
+            // Machine tasks refuse to run on a disabled machine, except those that enable it.
+            try {
+                machine.submit(() -> {
+                    machine.setEnabled(true);
+                    return null;
+                }, null, true)
+                       .get(MACHINE_TASK_TIMEOUT_S, TimeUnit.SECONDS);
+            }
+            catch (java.util.concurrent.ExecutionException e) {
+                JsonObject result = error("Could not enable the machine: "
+                        + describe(e.getCause() == null ? e : e.getCause()));
+                logAction("machine/home", body, result);
+                return result;
+            }
+        }
+        return runLogged("machine/home", body, machine, () -> {
+            machine.home();
+            JsonObject o = ok();
+            o.addProperty("enabled", machine.isEnabled());
+            o.addProperty("homed", machine.isHomed());
+            return o;
+        });
+    }
+
+    /**
+     * Drops whatever is on a nozzle at the machine's discard location, like the discard button.
+     * It does so even if OpenPnP thinks the nozzle is empty, since after a failure it may not
+     * know.
+     *
+     * Body: {confirm, nozzleId (optional, default the selected nozzle)}
+     */
+    private JsonObject discardPart(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Nozzle nozzle;
+        String nozzleId = getString(body, "nozzleId");
+        if (nozzleId != null) {
+            nozzle = findNozzle(machine, nozzleId);
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle with id " + nozzleId);
+            }
+        }
+        else {
+            nozzle = onSwing(() -> MainFrame.get()
+                                            .getMachineControls()
+                                            .getSelectedNozzle());
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle is selected, give nozzleId.");
+            }
+        }
+        Location discardLocation = machine.getDiscardLocation();
+        JsonObject gate = gateMotion(machine, body,
+                "Move nozzle " + nozzle.getName() + " to the discard location "
+                        + format(discardLocation) + " and release whatever it holds ("
+                        + (nozzle.getPart() == null ? "OpenPnP thinks it is empty"
+                                : "OpenPnP thinks it holds " + nozzle.getPart()
+                                                                     .getId())
+                        + ").");
+        if (gate != null) {
+            return gate;
+        }
+        return runLogged("nozzle/discard", body, machine, () -> {
+            String part = nozzle.getPart() == null ? null
+                    : nozzle.getPart()
+                            .getId();
+            Cycles.discardAlways(nozzle);
+            JsonObject o = ok();
+            o.addProperty("nozzleId", nozzle.getId());
+            o.addProperty("nozzleName", nozzle.getName());
+            o.addProperty("discardedPart", part);
+            o.add("discardLocation", toJson(discardLocation));
+            o.addProperty("vacuumCheckedAfterDiscard",
+                    nozzle.isPartOffEnabled(Nozzle.PartOffStep.AfterPlace));
+            o.addProperty("partOnNozzle", nozzle.getPart() == null ? null
+                    : nozzle.getPart()
+                            .getId());
+            return o;
+        });
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Bed map
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Starts scanning the bed map in the background and returns at once, since a full scan takes
+     * longer than a request may. Poll GET /bedmap/scan for progress.
+     *
+     * Body: {confirm, region (optional): {xMin, yMin, xMax, yMax} in mm}. Without a region the
+     * whole map is scanned again.
+     */
+    private JsonObject scanBedMap(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        if (isBedMapScanRunning()) {
+            throw new BadRequest("A bed map scan is already running.");
+        }
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        BedMapScanner scanner =
+                new BedMapScanner(machine, camera, BedMapScanner.getDefaultDirectory());
+        Rectangle2D region = getRegion(body.get("region"));
+        BedMapScanner.Plan plan = scanner.plan(region);
+
+        JsonObject gate = gateMotion(machine, body,
+                String.format(
+                        "Move camera %s at Safe Z over %d x %d = %d positions covering %s, "
+                                + "capture a frame at each and stitch them into the bed map (%s).",
+                        camera.getName(), plan.columns, plan.rows, plan.tiles.size(),
+                        format(plan.region),
+                        plan.full ? "replaces the whole map" : "updates this region of the map"));
+        if (gate != null) {
+            return gate;
+        }
+
+        JsonObject state = ok();
+        state.addProperty("running", true);
+        state.addProperty("done", 0);
+        state.addProperty("total", plan.tiles.size());
+        state.add("region", toJson(plan.region));
+        state.addProperty("started", timestamp());
+        synchronized (this) {
+            bedMapScanState = state;
+            bedMapScanCancel.set(false);
+        }
+        logAction("bedmap/scan", body, state);
+
+        Thread thread = new Thread(() -> runBedMapScan(machine, scanner, plan, body),
+                "AiBridgeBedMapScan");
+        thread.setDaemon(true);
+        thread.start();
+
+        JsonObject o = ok();
+        o.addProperty("started", true);
+        o.addProperty("total", plan.tiles.size());
+        o.add("region", toJson(plan.region));
+        o.addProperty("message", "Scanning in the background. Poll the scan state for progress.");
+        return o;
+    }
+
+    private void runBedMapScan(Machine machine, BedMapScanner scanner, BedMapScanner.Plan plan,
+            JsonObject body) {
+        JsonObject result;
+        try {
+            BedMap map = scanner.scan(plan, (m, done, total) -> {
+                synchronized (this) {
+                    bedMapScanState.addProperty("done", done);
+                }
+            }, bedMapScanCancel);
+            result = ok();
+            result.addProperty("cancelled", bedMapScanCancel.get());
+            result.add("mapArea", toJson(map.getBounds()));
+        }
+        catch (Exception e) {
+            Logger.warn(e, "AI bridge bed map scan failed");
+            result = error(describe(e));
+            try {
+                result.add("nozzlesAfterFailure", getNozzles().get("nozzles"));
+            }
+            catch (Exception e2) {
+                Logger.warn(e2, "AI bridge could not read nozzles");
+            }
+        }
+        result.add("safeZAfter", raiseToSafeZ(machine));
+        synchronized (this) {
+            JsonObject state = bedMapScanState;
+            for (Map.Entry<String, JsonElement> e : result.entrySet()) {
+                state.add(e.getKey(), e.getValue());
+            }
+            state.addProperty("running", false);
+            state.addProperty("finished", timestamp());
+        }
+        logAction("bedmap/scan/finished", body, result);
+    }
+
+    private synchronized boolean isBedMapScanRunning() {
+        return bedMapScanState != null && bedMapScanState.get("running")
+                                                         .getAsBoolean();
+    }
+
+    private synchronized JsonObject getBedMapScanState() {
+        if (bedMapScanState == null) {
+            JsonObject o = ok();
+            o.addProperty("running", false);
+            o.addProperty("message", "No bed map scan since OpenPnP started.");
+            return o;
+        }
+        // A copy, since the scan thread keeps changing it. This Gson has no public deepCopy().
+        return new JsonParser().parse(bedMapScanState.toString())
+                               .getAsJsonObject();
+    }
+
+    private JsonObject cancelBedMapScan() {
+        JsonObject o = ok();
+        o.addProperty("wasRunning", isBedMapScanRunning());
+        bedMapScanCancel.set(true);
+        o.addProperty("message",
+                "The scan stops after the current frame. What was scanned so far is kept.");
+        return o;
+    }
+
+    /**
+     * Returns the bed map, or a part of it, as an image together with what is needed to convert
+     * image pixels to machine coordinates.
+     *
+     * Query: xMin, yMin, xMax, yMax (optional, mm), maxSize (optional, longest image side in
+     * pixels).
+     */
+    private JsonObject getBedMap(Map<String, String> query) throws Exception {
+        BedMap map = BedMap.load(BedMapScanner.getDefaultDirectory());
+        JsonObject o = ok();
+        if (map == null) {
+            o.addProperty("exists", false);
+            o.addProperty("message", "There is no bed map yet. Scan one first.");
+            return o;
+        }
+        Rectangle2D area = map.getBounds();
+        if (query.containsKey("xMin") || query.containsKey("yMin") || query.containsKey("xMax")
+                || query.containsKey("yMax")) {
+            JsonObject region = new JsonObject();
+            for (String key : new String[] {"xMin", "yMin", "xMax", "yMax"}) {
+                if (query.get(key) == null) {
+                    throw new BadRequest("Give all of xMin, yMin, xMax and yMax, or none.");
+                }
+                region.addProperty(key, Double.parseDouble(query.get(key)));
+            }
+            area = getRegion(region);
+        }
+        int maxSize = MAX_BED_MAP_IMAGE_DIMENSION;
+        if (query.get("maxSize") != null) {
+            maxSize = Math.max(100,
+                    Math.min(MAX_BED_MAP_IMAGE_DIMENSION, Integer.parseInt(query.get("maxSize"))));
+        }
+        Rectangle pixels = map.toPixelRectangle(area);
+        BufferedImage crop = map.crop(area);
+        if (crop == null) {
+            throw new BadRequest("The area does not overlap the bed map " + format(map.getBounds())
+                    + ".");
+        }
+        BedMap.Info info = map.getInfo();
+        // The area the image actually shows, after snapping to whole map pixels.
+        Point2D topLeft = map.toMachine(pixels.x, pixels.y);
+        Point2D bottomRight = map.toMachine(pixels.x + pixels.width, pixels.y + pixels.height);
+        Rectangle2D shown = new Rectangle2D.Double(topLeft.getX(), bottomRight.getY(),
+                bottomRight.getX() - topLeft.getX(), topLeft.getY() - bottomRight.getY());
+        double scale = Math.min(1.0, (double) maxSize / Math.max(crop.getWidth(), crop.getHeight()));
+        int width = (int) Math.round(crop.getWidth() * scale);
+
+        o.addProperty("exists", true);
+        o.add("mapArea", toJson(map.getBounds()));
+        o.add("imageArea", toJson(shown));
+        o.addProperty("imageMmPerPixel", round(shown.getWidth() / width));
+        o.addProperty("coordinates",
+                "Image pixel (px, py) is at machine x = imageArea.xMin + px * imageMmPerPixel, "
+                        + "y = imageArea.yMax - py * imageMmPerPixel. Up in the image is +y.");
+        o.addProperty("viewingPlaneZ", round(info.viewingPlaneZ));
+        o.addProperty("cameraName", info.cameraName);
+        o.addProperty("updated", info.updated == null ? null
+                : new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ").format(info.updated));
+        JsonArray images = new JsonArray();
+        JsonObject i = new JsonObject();
+        i.addProperty("name", "bedmap");
+        i.addProperty("mimeType", "image/png");
+        i.addProperty("data", toPngBase64(crop, maxSize));
+        images.add(i);
+        o.add("images", images);
+        return o;
+    }
+
+    /**
+     * @return the region {xMin, yMin, xMax, yMax} in mm, or null if e is missing.
+     */
+    private static Rectangle2D getRegion(JsonElement e) throws BadRequest {
+        if (e == null || e.isJsonNull()) {
+            return null;
+        }
+        if (!e.isJsonObject()) {
+            throw new BadRequest("region must be an object {xMin, yMin, xMax, yMax} in mm.");
+        }
+        JsonObject r = e.getAsJsonObject();
+        double[] v = new double[4];
+        String[] keys = {"xMin", "yMin", "xMax", "yMax"};
+        for (int k = 0; k < keys.length; k++) {
+            JsonElement value = r.get(keys[k]);
+            if (value == null || value.isJsonNull()) {
+                throw new BadRequest("region needs xMin, yMin, xMax and yMax in mm.");
+            }
+            v[k] = value.getAsDouble();
+        }
+        if (v[2] <= v[0] || v[3] <= v[1]) {
+            throw new BadRequest("region needs xMax > xMin and yMax > yMin.");
+        }
+        return new Rectangle2D.Double(v[0], v[1], v[2] - v[0], v[3] - v[1]);
+    }
+
     // ---------------------------------------------------------------------------------------
     // Safety
     // ---------------------------------------------------------------------------------------
@@ -505,7 +840,13 @@ public class AiBridgeServer {
      * @return null if motion may proceed, otherwise the response to send instead.
      */
     private JsonObject gateMotion(Machine machine, JsonObject body, String plan) throws Exception {
-        String refusal = motionRefusal(machine);
+        return gate(motionRefusal(machine), body, plan);
+    }
+
+    /**
+     * @return null if the operation may proceed, otherwise the response to send instead.
+     */
+    private static JsonObject gate(String refusal, JsonObject body, String plan) {
         if (refusal != null) {
             JsonObject o = new JsonObject();
             o.addProperty("status", "refused");
@@ -531,11 +872,21 @@ public class AiBridgeServer {
         if (!machine.isHomed()) {
             return "Machine is not homed.";
         }
+        return homeRefusal(machine);
+    }
+
+    /**
+     * Like {@link #motionRefusal(Machine)}, but the machine may be disabled or not homed yet.
+     */
+    private String homeRefusal(Machine machine) throws Exception {
         if (isJobActive()) {
             return "A job is active.";
         }
         if (machine.isBusy()) {
             return "Machine is busy with another task.";
+        }
+        if (isBedMapScanRunning()) {
+            return "A bed map scan is running.";
         }
         return null;
     }
@@ -661,9 +1012,13 @@ public class AiBridgeServer {
     }
 
     private static String toPngBase64(BufferedImage image) throws IOException {
+        return toPngBase64(image, MAX_IMAGE_DIMENSION);
+    }
+
+    private static String toPngBase64(BufferedImage image, int maxDimension) throws IOException {
         int w = image.getWidth();
         int h = image.getHeight();
-        double scale = Math.min(1.0, (double) MAX_IMAGE_DIMENSION / Math.max(w, h));
+        double scale = Math.min(1.0, (double) maxDimension / Math.max(w, h));
         if (scale < 1.0) {
             int sw = (int) Math.round(w * scale);
             int sh = (int) Math.round(h * scale);
@@ -798,6 +1153,25 @@ public class AiBridgeServer {
         o.addProperty("units", l.getUnits()
                                 .getShortName());
         return o;
+    }
+
+    private static JsonElement toJson(Rectangle2D r) {
+        JsonObject o = new JsonObject();
+        o.addProperty("xMin", round(r.getMinX()));
+        o.addProperty("yMin", round(r.getMinY()));
+        o.addProperty("xMax", round(r.getMaxX()));
+        o.addProperty("yMax", round(r.getMaxY()));
+        o.addProperty("units", "mm");
+        return o;
+    }
+
+    private static String format(Rectangle2D r) {
+        return String.format("x %.1f to %.1f, y %.1f to %.1f mm", r.getMinX(), r.getMaxX(),
+                r.getMinY(), r.getMaxY());
+    }
+
+    private static String timestamp() {
+        return new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ").format(new Date());
     }
 
     private static String format(Location l) {

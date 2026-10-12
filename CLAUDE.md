@@ -26,7 +26,9 @@ ai-bridge\start-openpnp.bat         # 真機
 
 ## 操作規則（必須遵守）
 
-- **會讓機器移動的工具**（`inspect_feeder`、`pick_from_feeder`）：先不帶 `confirm` 呼叫，拿到 plan 後用一句話問使用者，使用者同意後才帶 `confirm=true` 再呼叫一次。每次都要問，前一次的同意不算數。
+- **會讓機器移動的工具**（`inspect_feeder`、`pick_from_feeder`、`scan_bed_map`、`home_machine`、`discard_part`）：先不帶 `confirm` 呼叫，拿到 plan 後用一句話問使用者，使用者同意後才帶 `confirm=true` 再呼叫一次。每次都要問，前一次的同意不算數。
+- `scan_bed_map` 在背景執行：用 `get_bed_map_scan_status` 查進度，跑完後看 `status`、`nozzlesAfterFailure` 和 `safeZAfter`。要停就用 `cancel_bed_map_scan`。
+- `home_machine` 在真機上要特別提醒：歸零時整個噴頭都會移動，使用者可能不在機器旁邊，要請他確認路徑上沒有東西。
 - 用 `openpnp`（真機）之前先跑 `get_status`，確認連到的是哪台機器、`motionAllowed` 是否為 true。
 - `reason` 要寫清楚為什麼做這個動作，它會進入動作紀錄。
 - 操作失敗時，先看 `nozzlesAfterFailure`，吸嘴上可能還留著零件，要告訴使用者。
