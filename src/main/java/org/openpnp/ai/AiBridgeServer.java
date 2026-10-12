@@ -54,6 +54,8 @@ import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Length;
+import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.model.Part;
 import org.openpnp.spi.Camera;
@@ -301,6 +303,14 @@ public class AiBridgeServer {
                 n.addProperty("partOnNozzle", nozzle.getPart() == null ? null
                         : nozzle.getPart()
                                 .getId());
+                // The Z OpenPnP last commanded. The steppers have no encoders, so after a crash
+                // or lost steps this may differ from reality until the machine is homed again.
+                Length z = nozzle.getLocation()
+                                 .getLengthZ();
+                n.addProperty("z", Math.round(z.convertToUnits(LengthUnit.Millimeters)
+                                               .getValue()
+                        * 1000) / 1000.0);
+                n.addProperty("atSafeZ", nozzle.isInSafeZZone(z));
                 nozzles.add(n);
             }
         }
@@ -555,8 +565,33 @@ public class AiBridgeServer {
             result = error(describe(e));
             result.add("nozzlesAfterFailure", getNozzles().get("nozzles"));
         }
+        result.add("safeZAfter", raiseToSafeZ(machine));
         logAction(action, body, result);
         return result;
+    }
+
+    /**
+     * Lifts everything on all heads to Safe Z, so that the next move cannot drag a nozzle across
+     * the machine. Runs after every motion endpoint, including failed ones, since a failure may
+     * leave a nozzle down.
+     */
+    private JsonObject raiseToSafeZ(Machine machine) {
+        JsonObject o = new JsonObject();
+        try {
+            runOnMachine(machine, () -> {
+                for (Head head : machine.getHeads()) {
+                    head.moveToSafeZ();
+                }
+                return null;
+            });
+            o.addProperty("raised", true);
+        }
+        catch (Exception e) {
+            Logger.warn(e, "AI bridge could not raise heads to Safe Z");
+            o.addProperty("raised", false);
+            o.addProperty("error", describe(e));
+        }
+        return o;
     }
 
     private <T> T runOnMachine(Machine machine, Callable<T> callable) throws Exception {

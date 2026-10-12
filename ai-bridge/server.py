@@ -81,7 +81,11 @@ def list_feeders(part_id: str | None = None) -> str:
 
 @mcp.tool()
 def list_nozzles() -> str:
-    """List nozzles with loaded nozzle tip, part on nozzle, and which one is selected in the GUI."""
+    """List nozzles with loaded nozzle tip, part on nozzle, and which one is selected in the GUI.
+
+    Also gives each nozzle's last commanded Z in mm and whether it is within Safe Z
+    (atSafeZ). The steppers have no encoders, so after a crash Z may be wrong.
+    """
     return json.dumps(_call("GET", "/nozzles"), ensure_ascii=False, indent=1)
 
 
@@ -92,7 +96,8 @@ def inspect_feeder(feeder_id: str, reason: str, confirm: bool = False, all_stage
     Returns how many parts were found, their locations, and the result image
     (or every stage image with all_stages=true). MOVES THE MACHINE: first call
     without confirm to get the plan, ask the user, and only then call again with
-    confirm=true. feeder_id may be the feeder id or its unique name.
+    confirm=true. feeder_id may be the feeder id or its unique name. Afterwards all
+    heads are lifted to Safe Z; safeZAfter reports whether that worked.
     """
     body = {"feederId": feeder_id, "confirm": confirm, "allStages": all_stages, "reason": reason}
     return _with_images(_call("POST", "/feeder/inspect", body=body))
@@ -111,7 +116,8 @@ def pick_from_feeder(
     MOVES THE MACHINE: first call without confirm to get the plan, ask the user,
     and only then call again with confirm=true. nozzle_id defaults to the nozzle
     selected in the GUI. If the call fails, check nozzlesAfterFailure: a part may
-    still be on the nozzle.
+    still be on the nozzle. Afterwards all heads are lifted to Safe Z (also after a
+    failure); safeZAfter reports whether that worked.
     """
     body = {
         "feederId": feeder_id,
