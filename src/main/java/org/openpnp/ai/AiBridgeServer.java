@@ -780,6 +780,10 @@ public class AiBridgeServer {
                         .getValue();
 
         BufferedImage frame = runOnMachine(machine, () -> camera.lightSettleAndCapture());
+        File captures = new File(bridgeDirectory, "captures");
+        captures.mkdirs();
+        ImageIO.write(frame, "png", new File(captures,
+                new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date()) + "-strip.png"));
         Location cameraLocation = camera.getLocation()
                                         .convertToUnits(LengthUnit.Millimeters);
         Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))

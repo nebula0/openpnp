@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
+import org.opencv.core.Core;
 import org.opencv.core.Mat;
 import org.opencv.core.MatOfPoint;
 import org.opencv.core.MatOfPoint2f;
@@ -207,12 +208,15 @@ public class StripTapeLocator {
     }
 
     /**
-     * Blobs that are not white, on light paper tape, of a size between a 0201 and a large IC.
+     * Blobs clearly darker than the paper, of a size between a 0201 and a large IC. The paper
+     * level is taken from the brightest part of the image, since the light varies.
      */
     static List<Point> findBlobs(Mat gray, double mmPerPixel, PixelToMachine toMachine) {
         List<Point> found = new ArrayList<>();
         Mat binary = new Mat();
-        Imgproc.threshold(gray, binary, 200, 255, Imgproc.THRESH_BINARY_INV);
+        double paper = paperLevel(gray);
+        double threshold = 0.75 * paper;
+        Imgproc.threshold(gray, binary, threshold, 255, Imgproc.THRESH_BINARY_INV);
         // Join the dark outline, light terminals and body of a part into one blob.
         int k = Math.max(3, (int) Math.round(0.25 / mmPerPixel)) | 1;
         Imgproc.morphologyEx(binary, binary, Imgproc.MORPH_CLOSE,
@@ -230,7 +234,11 @@ public class StripTapeLocator {
             points.release();
             double length = Math.max(rect.size.width, rect.size.height) * mmPerPixel;
             double width = Math.min(rect.size.width, rect.size.height) * mmPerPixel;
-            if (length > 0.4 && length < 6 && width > 0.2) {
+            // A part lies on the paper, so a frame around it must be about as light as paper.
+            // That rules out the texture of the dark surroundings.
+            if (length > 0.4 && length < 6 && width > 0.2
+                    && frameLevel(gray, Imgproc.boundingRect(contour),
+                            (int) Math.ceil(0.3 / mmPerPixel)) > 0.85 * paper) {
                 rects.add(rect);
             }
             contour.release();
@@ -255,6 +263,44 @@ public class StripTapeLocator {
             }
         }
         return found;
+    }
+
+    /**
+     * @return the mean gray level of a frame of the given margin around the box, or 0 if it does
+     *         not fit into the image.
+     */
+    static double frameLevel(Mat gray, org.opencv.core.Rect box, int margin) {
+        org.opencv.core.Rect outer = new org.opencv.core.Rect(box.x - margin, box.y - margin,
+                box.width + 2 * margin, box.height + 2 * margin);
+        if (outer.x < 0 || outer.y < 0 || outer.x + outer.width > gray.cols()
+                || outer.y + outer.height > gray.rows()) {
+            return 0;
+        }
+        double outerSum = Core.sumElems(gray.submat(outer)).val[0];
+        double innerSum = Core.sumElems(gray.submat(box)).val[0];
+        return (outerSum - innerSum) / (outer.area() - box.area());
+    }
+
+    /**
+     * @return the gray level of the paper tape, as the level only 15% of the image is brighter
+     *         than; the tape covers more than that of an image framing it.
+     */
+    static double paperLevel(Mat gray) {
+        byte[] data = new byte[(int) gray.total()];
+        Mat continuous = gray.isContinuous() ? gray : gray.clone();
+        continuous.get(0, 0, data);
+        int[] histogram = new int[256];
+        for (byte b : data) {
+            histogram[b & 0xff]++;
+        }
+        long brighter = 0;
+        for (int level = 255; level >= 0; level--) {
+            brighter += histogram[level];
+            if (brighter >= 0.15 * data.length) {
+                return level;
+            }
+        }
+        return 255;
     }
 
     /**
