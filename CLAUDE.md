@@ -16,7 +16,7 @@ ai-bridge\start-openpnp.bat sim     # 模擬機
 ai-bridge\start-openpnp.bat         # 真機
 ```
 
-VS Code 的 Java 擴充功能會把 class 編譯到同一個 `target/classes`，程式有錯時也照樣產出（執行時才會丟 "Unresolved compilation problem"），Maven 看到 class 比較新就不重編。所以打包前要先刪掉改過的套件的 class（例如 `target\classes\org\openpnpi`），讓 javac 真的重編一次。
+VS Code 的 Java 擴充功能會把 class 編譯到同一個 `target/classes`，程式有錯時也照樣產出（執行時才會丟 "Unresolved compilation problem"），Maven 看到 class 比較新就不重編。所以打包前要先刪掉改過的套件的 class（例如 `target/classes/org/openpnp/ai`），讓 javac 真的重編一次。
 
 專案編譯目標是 Java 11，不要升級，也不要加新依賴。Java 程式碼照 `OpenPnP_Eclipse_Formatter.xml` 的格式寫（之後要回饋給 upstream）。
 
