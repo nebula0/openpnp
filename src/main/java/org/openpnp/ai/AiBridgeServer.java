@@ -918,6 +918,7 @@ public class AiBridgeServer {
                                   .derive(location.getX(), location.getY(), location.getZ(),
                                           null));
                     BufferedImage frame = camera.lightSettleAndCapture();
+                    File frameFile = saveInspectionFrame(frame, entry.getKey(), placement);
                     Location upp = camera.getUnitsPerPixelAtZ()
                                          .convertToUnits(LengthUnit.Millimeters);
                     String name = entry.getKey()
@@ -932,6 +933,8 @@ public class AiBridgeServer {
                     r.add("expectedLocation", toJson(location));
                     BodyLocator.Result partBody = measureBody(frame, placement, location, upp, r);
                     r.addProperty("image", name);
+                    r.addProperty("frameFile", frameFile == null ? null
+                            : frameFile.getAbsolutePath());
                     results.add(r);
                     JsonObject i = new JsonObject();
                     i.addProperty("name", name);
@@ -960,6 +963,31 @@ public class AiBridgeServer {
      * taken with the camera centered on the expected location, and crops it to the part with
      * some margin.
      */
+    /**
+     * Keeps the original frame of an inspection, without drawings, for checking or tuning the
+     * measurement later.
+     *
+     * @return the file, or null if it could not be written.
+     */
+    private File saveInspectionFrame(BufferedImage frame, BoardLocation boardLocation,
+            Placement placement) {
+        File directory = new File(bridgeDirectory, "inspect");
+        directory.mkdirs();
+        String name = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date()) + "-"
+                + (boardLocation.getUniqueId() + "-" + placement.getId()).replaceAll(
+                        "[^A-Za-z0-9._-]", "_")
+                + ".png";
+        File file = new File(directory, name);
+        try {
+            ImageIO.write(frame, "png", file);
+            return file;
+        }
+        catch (IOException e) {
+            Logger.warn(e, "AI bridge could not save inspection frame {}", file);
+            return null;
+        }
+    }
+
     /**
      * Looks for the part body near the expected location, as a dark rectangle of the footprint's
      * body size, and adds the measured offset and rotation error to r as "measured".
@@ -997,7 +1025,7 @@ public class AiBridgeServer {
             }
             body = BodyLocator.locate(gray,
                     new org.opencv.core.Point(frame.getWidth() / 2.0, frame.getHeight() / 2.0),
-                    Math.max(bodyWidth, bodyHeight) / upp.getX(),
+                    expectedAxis, Math.max(bodyWidth, bodyHeight) / upp.getX(),
                     Math.min(bodyWidth, bodyHeight) / upp.getX());
         }
         finally {
@@ -1006,10 +1034,10 @@ public class AiBridgeServer {
         }
         if (body == null) {
             m.addProperty("found", false);
-            m.addProperty("reason", "No dark body of about " + round(Math.max(bodyWidth,
-                    bodyHeight)) + " x " + round(Math.min(bodyWidth, bodyHeight))
-                    + " mm near the expected location. The part may be missing, far off, or "
-                    + "not dark on a lighter board.");
+            m.addProperty("reason", "No body of " + round(Math.max(bodyWidth, bodyHeight))
+                    + " x " + round(Math.min(bodyWidth, bodyHeight))
+                    + " mm darker than its surroundings near the expected location. The part may "
+                    + "be missing, far off, or not dark on a lighter board.");
             return null;
         }
         // Image y grows downwards, machine y upwards.
@@ -1022,7 +1050,7 @@ public class AiBridgeServer {
         m.addProperty("rotationError",
                 Math.round(BodyLocator.normalizeHalfTurn(body.angle - expectedAxis) * 100)
                         / 100.0);
-        m.addProperty("sizeRatio", round(body.lengthRatio) + " x " + round(body.widthRatio));
+        m.addProperty("contrast", Math.round(body.contrast));
         m.addProperty("note", "The body outline cannot tell pin 1 from the opposite end, check "
                 + "polarity in the image.");
         return body;

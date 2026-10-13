@@ -20,21 +20,25 @@
 package org.openpnp.ai;
 
 import java.awt.Rectangle;
-import java.util.ArrayList;
-import java.util.List;
 
+import org.opencv.core.Core;
+import org.opencv.core.Core.MinMaxLocResult;
+import org.opencv.core.CvType;
 import org.opencv.core.Mat;
-import org.opencv.core.MatOfPoint;
-import org.opencv.core.MatOfPoint2f;
 import org.opencv.core.Point;
 import org.opencv.core.RotatedRect;
+import org.opencv.core.Scalar;
 import org.opencv.core.Size;
 import org.opencv.imgproc.Imgproc;
 
 /**
- * Finds the body of a placed part in a top camera image: a dark rectangle of about the expected
- * size near the expected location, as an IC body on a lighter board. Parts that do not look like
- * that, such as most passives, are not found rather than measured wrongly.
+ * Finds the body of a placed part in a top camera image, as an IC body on a lighter board: a
+ * rectangle of the expected size that is darker than a thin ring around it.
+ *
+ * The rectangle is slid over the image near the expected location, at a few angles around the
+ * expected one, and the position with the largest contrast between the ring and the inside wins.
+ * Averaging over the whole inside makes it robust against markings and reflections on the body,
+ * which break up thresholded shapes.
  *
  * Works in image pixels. Angles are counterclockwise in degrees with y up, as machine angles,
  * although image y grows downwards.
@@ -45,12 +49,13 @@ public class BodyLocator {
     }
 
     /**
-     * How far the found size may differ from the expected one, as a fraction.
+     * The smallest contrast, in gray levels, between the ring and the inside of a body.
      */
-    public static final double SIZE_TOLERANCE = 0.25;
+    public static final double MIN_CONTRAST = 25;
+    public static final double ANGLE_RANGE = 5;
+    public static final double ANGLE_STEP = 0.5;
 
     public static class Result {
-        public final RotatedRect rect;
         /**
          * Center of the body in image pixels.
          */
@@ -60,107 +65,106 @@ public class BodyLocator {
          */
         public final double angle;
         /**
-         * Found long and short side over the expected ones.
+         * Mean gray level of the ring around the body minus that of the body.
          */
-        public final double lengthRatio;
-        public final double widthRatio;
+        public final double contrast;
+        public final RotatedRect rect;
 
-        Result(RotatedRect rect, double angle, double lengthRatio, double widthRatio) {
-            this.rect = rect;
-            this.center = rect.center;
+        Result(Point center, double angle, double contrast, double length, double width) {
+            this.center = center;
             this.angle = angle;
-            this.lengthRatio = lengthRatio;
-            this.widthRatio = widthRatio;
+            this.contrast = contrast;
+            // OpenCV angles turn clockwise in image coordinates.
+            this.rect = new RotatedRect(center, new Size(length, width), -angle);
         }
     }
 
     /**
      * @param gray 8 bit gray image.
      * @param expectedCenter where the body should be, in pixels.
-     * @param length the expected long side of the body, in pixels.
-     * @param width the expected short side of the body, in pixels.
-     * @return the body, or null if no dark rectangle of about that size is near the expected
-     *         location.
+     * @param expectedAngle the expected direction of the body's long side, in degrees.
+     * @param length the long side of the body, in pixels.
+     * @param width the short side of the body, in pixels.
+     * @return the body, or null if nothing near the expected location looks like it.
      */
-    public static Result locate(Mat gray, Point expectedCenter, double length, double width) {
-        // Search within one body length around the expected center.
-        int reach = (int) Math.ceil(length);
-        Rectangle roi = new Rectangle((int) Math.floor(expectedCenter.x - reach),
-                (int) Math.floor(expectedCenter.y - reach), 2 * reach, 2 * reach)
+    public static Result locate(Mat gray, Point expectedCenter, double expectedAngle,
+            double length, double width) {
+        int l = (int) Math.round(length);
+        int w = (int) Math.round(width);
+        int ring = Math.max(3, (int) Math.round(width * 0.15));
+        // The body may be off by up to its width in any direction.
+        int half = (int) Math.ceil(length / 2 + width + ring);
+        Rectangle roi = new Rectangle((int) Math.floor(expectedCenter.x - half),
+                (int) Math.floor(expectedCenter.y - half), 2 * half, 2 * half)
                         .intersection(new Rectangle(0, 0, gray.cols(), gray.rows()));
-        if (roi.isEmpty()) {
+        if (roi.width < l + 2 * ring + 2 || roi.height < w + 2 * ring + 2) {
             return null;
         }
         Mat sub = gray.submat(roi.y, roi.y + roi.height, roi.x, roi.x + roi.width);
-        Mat blurred = new Mat();
-        Mat binary = new Mat();
-        Mat hierarchy = new Mat();
-        List<MatOfPoint> contours = new ArrayList<>();
-        try {
-            Imgproc.GaussianBlur(sub, blurred, new Size(5, 5), 0);
-            // Dark body on a lighter board: Otsu picks the level between them.
-            Imgproc.threshold(blurred, binary, 0, 255,
-                    Imgproc.THRESH_BINARY_INV | Imgproc.THRESH_OTSU);
-            // Thin dark traces may touch the body, opening cuts them off.
-            int k = Math.max(3, (int) Math.round(width / 20)) | 1;
-            Imgproc.morphologyEx(binary, binary, Imgproc.MORPH_OPEN,
-                    Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(k, k)));
-            Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_EXTERNAL,
-                    Imgproc.CHAIN_APPROX_SIMPLE);
+        Mat image = new Mat();
+        sub.convertTo(image, CvType.CV_32F);
+        sub.release();
+        Point roiCenter = new Point(roi.width / 2.0, roi.height / 2.0);
+        double innerArea = (double) l * w;
+        double outerArea = (double) (l + 2 * ring) * (w + 2 * ring);
 
-            Result best = null;
-            double bestScore = Double.MAX_VALUE;
-            for (MatOfPoint contour : contours) {
-                MatOfPoint2f points = new MatOfPoint2f(contour.toArray());
-                RotatedRect rect = Imgproc.minAreaRect(points);
-                points.release();
-                double a = Math.max(rect.size.width, rect.size.height);
-                double b = Math.min(rect.size.width, rect.size.height);
-                double lengthRatio = a / length;
-                double widthRatio = b / width;
-                if (Math.abs(lengthRatio - 1) > SIZE_TOLERANCE
-                        || Math.abs(widthRatio - 1) > SIZE_TOLERANCE) {
+        Result best = null;
+        Mat rotation = null;
+        Mat rotated = new Mat();
+        Mat inner = new Mat();
+        Mat outer = new Mat();
+        Mat score = new Mat();
+        try {
+            for (double a = -ANGLE_RANGE; a <= ANGLE_RANGE + 1e-9; a += ANGLE_STEP) {
+                double angle = expectedAngle + a;
+                // Turn the image so that a body at this angle lies level.
+                rotation = Imgproc.getRotationMatrix2D(roiCenter, -angle, 1.0);
+                Imgproc.warpAffine(image, rotated, rotation, image.size(), Imgproc.INTER_LINEAR,
+                        Core.BORDER_REPLICATE);
+                Imgproc.boxFilter(rotated, inner, -1, new Size(l, w));
+                Imgproc.boxFilter(rotated, outer, -1, new Size(l + 2 * ring, w + 2 * ring));
+                // Mean of the ring = (sum of outer - sum of inner) / ring area.
+                Core.multiply(outer, new Scalar(outerArea), outer);
+                Core.multiply(inner, new Scalar(innerArea), score);
+                Core.subtract(outer, score, outer);
+                Core.multiply(outer, new Scalar(1 / (outerArea - innerArea)),
+                        outer);
+                Core.subtract(outer, inner, score);
+                // Only where the whole ring lies inside the image, the border is made up.
+                int mx = (l + 2 * ring) / 2 + 1;
+                int my = (w + 2 * ring) / 2 + 1;
+                if (score.cols() <= 2 * mx || score.rows() <= 2 * my) {
+                    rotation.release();
                     continue;
                 }
-                Point center = new Point(rect.center.x + roi.x, rect.center.y + roi.y);
-                double distance = Math.hypot(center.x - expectedCenter.x,
-                        center.y - expectedCenter.y) / length;
-                double score = Math.abs(lengthRatio - 1) + Math.abs(widthRatio - 1) + distance;
-                if (score < bestScore) {
-                    bestScore = score;
-                    RotatedRect found = new RotatedRect(center, rect.size, rect.angle);
-                    best = new Result(found, longSideAngle(found), lengthRatio, widthRatio);
+                Mat valid = score.submat(my, score.rows() - my, mx, score.cols() - mx);
+                MinMaxLocResult m = Core.minMaxLoc(valid);
+                valid.release();
+                if (best == null || m.maxVal > best.contrast) {
+                    // Turn the found position back into the original image.
+                    Mat inverse = new Mat();
+                    Imgproc.invertAffineTransform(rotation, inverse);
+                    double x = m.maxLoc.x + mx;
+                    double y = m.maxLoc.y + my;
+                    double ox = inverse.get(0, 0)[0] * x + inverse.get(0, 1)[0] * y
+                            + inverse.get(0, 2)[0];
+                    double oy = inverse.get(1, 0)[0] * x + inverse.get(1, 1)[0] * y
+                            + inverse.get(1, 2)[0];
+                    inverse.release();
+                    best = new Result(new Point(ox + roi.x, oy + roi.y), normalizeHalfTurn(angle),
+                            m.maxVal, length, width);
                 }
+                rotation.release();
             }
-            return best;
         }
         finally {
-            for (MatOfPoint contour : contours) {
-                contour.release();
-            }
-            sub.release();
-            blurred.release();
-            binary.release();
-            hierarchy.release();
+            image.release();
+            rotated.release();
+            inner.release();
+            outer.release();
+            score.release();
         }
-    }
-
-    /**
-     * @return the direction of the long side of the rectangle, counterclockwise with y up, in
-     *         (-90, 90].
-     */
-    static double longSideAngle(RotatedRect rect) {
-        Point[] p = new Point[4];
-        rect.points(p);
-        double dx1 = p[1].x - p[0].x;
-        double dy1 = p[1].y - p[0].y;
-        double dx2 = p[2].x - p[1].x;
-        double dy2 = p[2].y - p[1].y;
-        boolean firstLonger = Math.hypot(dx1, dy1) >= Math.hypot(dx2, dy2);
-        double dx = firstLonger ? dx1 : dx2;
-        double dy = firstLonger ? dy1 : dy2;
-        // Image y grows downwards.
-        return normalizeHalfTurn(Math.toDegrees(Math.atan2(-dy, dx)));
+        return best == null || best.contrast < MIN_CONTRAST ? null : best;
     }
 
     /**

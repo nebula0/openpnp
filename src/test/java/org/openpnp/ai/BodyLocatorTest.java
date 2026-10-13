@@ -20,41 +20,54 @@ public class BodyLocatorTest {
     }
 
     /**
-     * A light board with a dark body, rotated by angle (counterclockwise, y up).
+     * A light board with a dark trace.
      */
-    private static Mat board(Point center, double length, double width, double angle) {
+    private static Mat board() {
         Mat image = new Mat(600, 800, CvType.CV_8UC1, new Scalar(200));
-        // A dark trace touching the body, which must not change the result.
-        Imgproc.line(image, new Point(0, center.y), center, new Scalar(30), 3);
-        // OpenCV angles are clockwise in image coordinates.
-        Point[] p = new Point[4];
-        new RotatedRect(center, new Size(length, width), -angle).points(p);
-        Imgproc.fillConvexPoly(image, new MatOfPoint(p), new Scalar(40));
+        Imgproc.line(image, new Point(0, 300), new Point(800, 320), new Scalar(30), 3);
         return image;
+    }
+
+    /**
+     * Draws a dark body, rotated by angle (counterclockwise, y up), with bright markings on it.
+     */
+    private static void body(Mat image, Point center, double length, double width,
+            double angle) {
+        Point[] p = new Point[4];
+        // OpenCV angles are clockwise in image coordinates.
+        new RotatedRect(center, new Size(length, width), -angle).points(p);
+        Imgproc.fillConvexPoly(image, new MatOfPoint(p), new Scalar(60));
+        Imgproc.putText(image, "AD608", new Point(center.x - 60, center.y + 10),
+                Imgproc.FONT_HERSHEY_SIMPLEX, 1.2, new Scalar(180), 3);
     }
 
     @Test
     public void findsShiftedAndRotatedBody() {
-        Mat image = board(new Point(420, 290), 300, 120, 3);
-        BodyLocator.Result r = BodyLocator.locate(image, new Point(400, 300), 300, 120);
+        Mat image = board();
+        body(image, new Point(420, 290), 300, 120, 3);
+        BodyLocator.Result r =
+                BodyLocator.locate(image, new Point(400, 300), 0, 300, 120);
         assertNotNull(r);
-        assertEquals(420, r.center.x, 1.5);
-        assertEquals(290, r.center.y, 1.5);
-        assertEquals(3, r.angle, 0.5);
+        assertEquals(420, r.center.x, 2);
+        assertEquals(290, r.center.y, 2);
+        assertEquals(3, r.angle, 0.6);
     }
 
     @Test
     public void findsUprightBody() {
-        Mat image = board(new Point(400, 300), 300, 120, 90);
-        BodyLocator.Result r = BodyLocator.locate(image, new Point(400, 300), 300, 120);
+        Mat image = board();
+        body(image, new Point(390, 310), 300, 120, 89);
+        BodyLocator.Result r =
+                BodyLocator.locate(image, new Point(400, 300), 90, 300, 120);
         assertNotNull(r);
-        assertEquals(90, Math.abs(r.angle), 0.5);
+        assertEquals(390, r.center.x, 2);
+        assertEquals(310, r.center.y, 2);
+        assertEquals(89, r.angle, 0.6);
     }
 
     @Test
-    public void ignoresWrongSize() {
-        Mat image = board(new Point(400, 300), 150, 60, 0);
-        assertNull(BodyLocator.locate(image, new Point(400, 300), 300, 120));
+    public void findsNothingWithoutBody() {
+        assertNull(BodyLocator.locate(board(), new Point(400, 300), 0, 300, 120));
     }
 
     @Test
