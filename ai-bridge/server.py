@@ -230,8 +230,11 @@ def place_from_job(
     MOVES THE MACHINE: first call without confirm to get the plan (placement location, nozzles
     and feeders), ask the user, and only then call again with confirm=true. Check "warnings":
     a placement marked as placed may already have a part on the board. After the job the head
-    is parked; on failure the job processor discards what was picked, and nozzlesAfterFailure
-    shows what is left.
+    is parked. If a feeder finds no part, OpenPnP disables it and the remaining placements are
+    run again with the next enabled feeder, until all are placed or no feeder is left
+    (feedersDisabled lists them; re-enable them in the Feeders tab later). The result always
+    lists which placements were placed. On failure the job processor discards what was
+    picked, and nozzlesAfterFailure shows what is left.
     """
     body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
     return json.dumps(_call("POST", "/job/place", body=body, timeout=JOB_TIMEOUT_S),

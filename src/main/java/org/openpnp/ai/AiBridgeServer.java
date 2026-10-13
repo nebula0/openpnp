@@ -74,6 +74,7 @@ import org.openpnp.spi.Camera;
 import org.openpnp.spi.Feeder;
 import org.openpnp.spi.Head;
 import org.openpnp.spi.JobProcessor;
+import org.openpnp.spi.JobProcessor.JobProcessorException;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.util.Cycles;
@@ -773,23 +774,41 @@ public class AiBridgeServer {
 
         JsonObject result = runLogged("job/place", body, machine, JOB_TIMEOUT_S, () -> {
             JobProcessor processor = machine.getPnpJobProcessor();
-            processor.initialize(job);
-            try {
-                while (processor.next()) {
-                    // Each call runs one step of the job.
-                }
-            }
-            catch (Exception e) {
+            List<String> disabledFeeders = new ArrayList<>();
+            String error = null;
+            while (true) {
+                processor.initialize(job);
                 try {
-                    // Discards whatever was picked and parks the head.
-                    processor.abort();
+                    while (processor.next()) {
+                        // Each call runs one step of the job.
+                    }
+                    break;
                 }
-                catch (Exception e2) {
-                    Logger.warn(e2, "AI bridge could not abort the job");
+                catch (Exception e) {
+                    try {
+                        // Discards whatever was picked and parks the head.
+                        processor.abort();
+                    }
+                    catch (Exception e2) {
+                        Logger.warn(e2, "AI bridge could not abort the job");
+                    }
+                    error = describe(e);
+                    Logger.warn(e, "AI bridge job/place step failed");
+                    // A feeder that found no part has been disabled by the job processor. Run
+                    // the rest of the placements again, which then use the next feeder, until
+                    // the placements are done or no feeder is left.
+                    Object source = e instanceof JobProcessorException
+                            ? ((JobProcessorException) e).getSource()
+                            : null;
+                    if (source instanceof Feeder && !((Feeder) source).isEnabled()) {
+                        disabledFeeders.add(((Feeder) source).getName());
+                        if (hasFeedersLeft(machine, job, selected)) {
+                            continue;
+                        }
+                    }
+                    break;
                 }
-                throw e;
             }
-            JsonObject o = ok();
             JsonArray placed = new JsonArray();
             int missing = 0;
             for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
@@ -804,16 +823,50 @@ public class AiBridgeServer {
                     missing += done ? 0 : 1;
                 }
             }
-            if (missing > 0) {
-                o = error(missing + " placement(s) were not placed, see the OpenPnP log.");
+            JsonObject o;
+            if (missing == 0) {
+                o = ok();
+            }
+            else {
+                o = error(missing + " placement(s) were not placed. Last error: "
+                        + (error == null ? "none, see the OpenPnP log" : error));
             }
             o.add("placements", placed);
+            o.add("feedersDisabled", gson.toJsonTree(disabledFeeders));
             return o;
         });
+        if (!"ok".equals(getString(result, "status")) && !result.has("nozzlesAfterFailure")) {
+            result.add("nozzlesAfterFailure", getNozzles().get("nozzles"));
+        }
         if (!warnings.isEmpty()) {
             result.add("warnings", gson.toJsonTree(warnings));
         }
         return result;
+    }
+
+    /**
+     * @return true if every placement still to do has an enabled feeder for its part.
+     */
+    private static boolean hasFeedersLeft(Machine machine, Job job,
+            Map<BoardLocation, List<Placement>> selected) {
+        for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+            for (Placement placement : entry.getValue()) {
+                if (job.retrievePlacedStatus(entry.getKey(), placement.getId())) {
+                    continue;
+                }
+                boolean found = false;
+                for (Feeder feeder : machine.getFeeders()) {
+                    if (feeder.isEnabled() && feeder.getPart() == placement.getPart()) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private String describePlacement(Machine machine, BoardLocation boardLocation,
