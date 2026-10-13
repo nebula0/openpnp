@@ -64,6 +64,7 @@ import javax.swing.SwingUtilities;
 import org.apache.commons.io.IOUtils;
 import org.opencv.core.Mat;
 import org.opencv.core.RotatedRect;
+import org.opencv.imgproc.Imgproc;
 import org.openpnp.bedmap.BedMap;
 import org.openpnp.bedmap.BedMapScanner;
 import org.openpnp.gui.FeedersPanel;
@@ -929,14 +930,15 @@ public class AiBridgeServer {
                     r.addProperty("partId", placement.getPart()
                                                      .getId());
                     r.add("expectedLocation", toJson(location));
+                    BodyLocator.Result partBody = measureBody(frame, placement, location, upp, r);
                     r.addProperty("image", name);
                     results.add(r);
                     JsonObject i = new JsonObject();
                     i.addProperty("name", name);
                     i.addProperty("mimeType", "image/png");
-                    i.addProperty("data",
-                            toPngBase64(drawExpectedFootprint(frame, placement, location, upp),
-                                    MAX_IMAGE_DIMENSION));
+                    i.addProperty("data", toPngBase64(
+                            drawExpectedFootprint(frame, placement, location, upp, partBody),
+                            MAX_IMAGE_DIMENSION));
                     images.add(i);
                 }
             }
@@ -944,7 +946,10 @@ public class AiBridgeServer {
             o.add("fiducialsChecked", fiducialsChecked);
             o.add("placements", results);
             o.addProperty("legend", "Drawn where the job expects the part: body outline green, "
-                    + "pads cyan, pin 1 red dot, image center (camera position) yellow cross.");
+                    + "pads cyan, pin 1 red dot, image center (camera position) yellow cross. "
+                    + "The measured body is drawn in magenta. measured.offsetX/Y is the measured "
+                    + "minus the expected body center in machine mm, rotationError in degrees "
+                    + "counterclockwise.");
             o.add("images", images);
             return o;
         });
@@ -955,8 +960,76 @@ public class AiBridgeServer {
      * taken with the camera centered on the expected location, and crops it to the part with
      * some margin.
      */
+    /**
+     * Looks for the part body near the expected location, as a dark rectangle of the footprint's
+     * body size, and adds the measured offset and rotation error to r as "measured".
+     *
+     * @return the body found, or null.
+     */
+    private static BodyLocator.Result measureBody(BufferedImage frame, Placement placement,
+            Location location, Location upp, JsonObject r) {
+        JsonObject m = new JsonObject();
+        r.add("measured", m);
+        Part part = placement.getPart();
+        Footprint footprint = part.getPackage() == null ? null
+                : part.getPackage()
+                      .getFootprint();
+        if (footprint == null || footprint.getBodyWidth() <= 0
+                || footprint.getBodyHeight() <= 0) {
+            m.addProperty("found", false);
+            m.addProperty("reason", "The package footprint has no body size.");
+            return null;
+        }
+        double mm = new Length(1, footprint.getUnits()).convertToUnits(LengthUnit.Millimeters)
+                                                       .getValue();
+        double bodyWidth = footprint.getBodyWidth() * mm;
+        double bodyHeight = footprint.getBodyHeight() * mm;
+        double expectedAxis = location.getRotation() + (bodyWidth >= bodyHeight ? 0 : 90);
+        Mat color = OpenCvUtils.toMat(frame);
+        Mat gray = new Mat();
+        BodyLocator.Result body;
+        try {
+            if (color.channels() == 1) {
+                color.copyTo(gray);
+            }
+            else {
+                Imgproc.cvtColor(color, gray, Imgproc.COLOR_BGR2GRAY);
+            }
+            body = BodyLocator.locate(gray,
+                    new org.opencv.core.Point(frame.getWidth() / 2.0, frame.getHeight() / 2.0),
+                    Math.max(bodyWidth, bodyHeight) / upp.getX(),
+                    Math.min(bodyWidth, bodyHeight) / upp.getX());
+        }
+        finally {
+            color.release();
+            gray.release();
+        }
+        if (body == null) {
+            m.addProperty("found", false);
+            m.addProperty("reason", "No dark body of about " + round(Math.max(bodyWidth,
+                    bodyHeight)) + " x " + round(Math.min(bodyWidth, bodyHeight))
+                    + " mm near the expected location. The part may be missing, far off, or "
+                    + "not dark on a lighter board.");
+            return null;
+        }
+        // Image y grows downwards, machine y upwards.
+        double offsetX = (body.center.x - frame.getWidth() / 2.0) * upp.getX();
+        double offsetY = -(body.center.y - frame.getHeight() / 2.0) * upp.getY();
+        m.addProperty("found", true);
+        m.addProperty("offsetX", round(offsetX));
+        m.addProperty("offsetY", round(offsetY));
+        m.addProperty("offset", round(Math.hypot(offsetX, offsetY)));
+        m.addProperty("rotationError",
+                Math.round(BodyLocator.normalizeHalfTurn(body.angle - expectedAxis) * 100)
+                        / 100.0);
+        m.addProperty("sizeRatio", round(body.lengthRatio) + " x " + round(body.widthRatio));
+        m.addProperty("note", "The body outline cannot tell pin 1 from the opposite end, check "
+                + "polarity in the image.");
+        return body;
+    }
+
     private static BufferedImage drawExpectedFootprint(BufferedImage frame, Placement placement,
-            Location location, Location upp) {
+            Location location, Location upp, BodyLocator.Result body) {
         Part part = placement.getPart();
         Footprint footprint =
                 part.getPackage() == null ? null : part.getPackage()
@@ -1005,6 +1078,20 @@ public class AiBridgeServer {
         g.setColor(new Color(255, 255, 0, 220));
         g.draw(new Line2D.Double(cx - arm, cy, cx + arm, cy));
         g.draw(new Line2D.Double(cx, cy - arm, cx, cy + arm));
+        if (body != null) {
+            org.opencv.core.Point[] p = new org.opencv.core.Point[4];
+            body.rect.points(p);
+            java.awt.geom.Path2D.Double outline = new java.awt.geom.Path2D.Double();
+            outline.moveTo(p[0].x, p[0].y);
+            for (int k = 1; k < 4; k++) {
+                outline.lineTo(p[k].x, p[k].y);
+            }
+            outline.closePath();
+            g.setColor(new Color(255, 0, 255, 220));
+            g.draw(outline);
+            g.fill(new Ellipse2D.Double(body.center.x - arm / 6, body.center.y - arm / 6, arm / 3,
+                    arm / 3));
+        }
         g.dispose();
 
         // Crop around the part, with a margin of half its size, but at least 1.5 mm.

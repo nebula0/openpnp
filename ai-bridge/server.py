@@ -253,6 +253,12 @@ def inspect_placements(
     (body outline green, pads cyan, pin 1 red dot, camera center yellow cross). Compare the
     real part with the drawing for offset, rotation, polarity (pin 1) and missing parts.
 
+    Each placement also gets "measured": the part body is searched as a dark rectangle of the
+    footprint's body size (drawn in magenta), giving offsetX/offsetY (measured minus expected,
+    machine mm) and rotationError (degrees, counterclockwise). This suits IC bodies on a
+    lighter board; when found is false, judge from the image. The measurement cannot tell
+    pin 1 from the opposite end, so check polarity in the image.
+
     placements: [{"boardId": "Pnl1⇒Brd1", "placementId": "U1"}, ...] as for place_from_job.
     MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
     to get the plan, ask the user, and only then call again with confirm=true.
