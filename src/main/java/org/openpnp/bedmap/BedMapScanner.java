@@ -29,6 +29,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
@@ -42,6 +43,7 @@ import org.opencv.core.Mat;
 import org.opencv.core.Size;
 import org.opencv.imgproc.Imgproc;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.spi.Camera;
@@ -127,6 +129,11 @@ public class BedMapScanner {
         public double mmPerPixelY;
         public int width;
         public int height;
+        /**
+         * The Z of the plane mmPerPixelX/Y refer to, or null for frames stored before this was
+         * recorded.
+         */
+        public Double viewingPlaneZ;
         public Date captured;
     }
 
@@ -351,7 +358,8 @@ public class BedMapScanner {
                 }
                 BufferedImage frame = capture(tile);
                 draw(map, frame, tile, upp);
-                records.add(saveTile(tilesDirectory, stamp, done, tile, frame, upp));
+                records.add(saveTile(tilesDirectory, stamp, done, tile, frame, upp,
+                        info.viewingPlaneZ));
                 done++;
                 if (listener != null) {
                     listener.tileDone(map, done, plan.tiles.size());
@@ -420,7 +428,7 @@ public class BedMapScanner {
     }
 
     private static TileRecord saveTile(File tilesDirectory, long stamp, int index, Tile tile,
-            BufferedImage frame, Location upp) throws IOException {
+            BufferedImage frame, Location upp, double viewingPlaneZ) throws IOException {
         TileRecord r = new TileRecord();
         r.file = String.format("tile-%d-%04d.jpg", stamp, index);
         r.x = tile.x;
@@ -429,6 +437,7 @@ public class BedMapScanner {
         r.mmPerPixelY = upp.getY();
         r.width = frame.getWidth();
         r.height = frame.getHeight();
+        r.viewingPlaneZ = viewingPlaneZ;
         r.captured = new Date();
         // JPEG keeps the many full resolution frames small enough.
         BufferedImage rgb = frame;
@@ -442,6 +451,149 @@ public class BedMapScanner {
         }
         ImageIO.write(rgb, "jpg", new File(tilesDirectory, r.file));
         return r;
+    }
+
+    /**
+     * Stitches the stored original frames anew for a machine area, at any resolution up to that
+     * of the frames themselves. As in the bed map, each pixel is taken from the frame whose
+     * center is nearest. Does not move the machine.
+     *
+     * @param camera the camera that captured the frames, used for the scale at viewingPlaneZ. May
+     *        be null if viewingPlaneZ is null.
+     * @param viewingPlaneZ the Z of the plane to stitch for, or null for the plane the frames were
+     *        captured for. Objects at this height line up across frame borders.
+     * @return the image, or null if no stored frame covers the area.
+     */
+    public static BufferedImage render(File directory, Rectangle2D area, double mmPerPixel,
+            Camera camera, Double viewingPlaneZ) throws IOException {
+        int width = (int) Math.ceil(area.getWidth() / mmPerPixel - 1e-9);
+        int height = (int) Math.ceil(area.getHeight() / mmPerPixel - 1e-9);
+        List<TileRecord> records = new ArrayList<>();
+        List<Rectangle2D> frameAreas = new ArrayList<>();
+        for (TileRecord r : loadTileRecords(directory)) {
+            Point2D scale = getScale(r, camera, viewingPlaneZ);
+            double w = r.width * r.mmPerPixelX * scale.getX();
+            double h = r.height * r.mmPerPixelY * scale.getY();
+            Rectangle2D frameArea = new Rectangle2D.Double(r.x - w / 2, r.y - h / 2, w, h);
+            if (frameArea.intersects(area)) {
+                records.add(r);
+                frameAreas.add(frameArea);
+            }
+        }
+        if (records.isEmpty() || width <= 0 || height <= 0) {
+            return null;
+        }
+
+        // Which frame each pixel comes from. The distance to a frame center is measured in frame
+        // sizes, so that below 0.5 the pixel is inside the frame.
+        int[] owner = new int[width * height];
+        double[] nearest = new double[width * height];
+        Arrays.fill(owner, -1);
+        Arrays.fill(nearest, 0.5);
+        for (int k = 0; k < records.size(); k++) {
+            Rectangle2D frameArea = frameAreas.get(k);
+            Rectangle pixels = toPixels(frameArea, area, mmPerPixel, width, height);
+            for (int py = pixels.y; py < pixels.y + pixels.height; py++) {
+                double y = area.getMaxY() - (py + 0.5) * mmPerPixel;
+                double dy = Math.abs(y - frameArea.getCenterY()) / frameArea.getHeight();
+                for (int px = pixels.x; px < pixels.x + pixels.width; px++) {
+                    double x = area.getMinX() + (px + 0.5) * mmPerPixel;
+                    double d = Math.max(Math.abs(x - frameArea.getCenterX()) / frameArea.getWidth(),
+                            dy);
+                    int i = py * width + px;
+                    if (d < nearest[i]) {
+                        nearest[i] = d;
+                        owner[i] = k;
+                    }
+                }
+            }
+        }
+
+        File tilesDirectory = new File(directory, TILES_DIRECTORY);
+        int[] rgb = new int[width * height];
+        for (int k = 0; k < records.size(); k++) {
+            Rectangle2D frameArea = frameAreas.get(k);
+            Rectangle pixels = toPixels(frameArea, area, mmPerPixel, width, height);
+            if (!owns(owner, k, pixels, width)) {
+                continue;
+            }
+            BufferedImage frame = ImageIO.read(new File(tilesDirectory, records.get(k).file));
+            if (frame == null) {
+                Logger.warn("Could not read bed map tile {}", records.get(k).file);
+                continue;
+            }
+            int scaledWidth = Math.max(1, (int) Math.round(frameArea.getWidth() / mmPerPixel));
+            int scaledHeight = Math.max(1, (int) Math.round(frameArea.getHeight() / mmPerPixel));
+            Mat src = OpenCvUtils.toMat(frame);
+            Mat dst = new Mat();
+            Imgproc.resize(src, dst, new Size(scaledWidth, scaledHeight), 0, 0,
+                    scaledWidth < frame.getWidth() ? Imgproc.INTER_AREA : Imgproc.INTER_LINEAR);
+            BufferedImage scaled = OpenCvUtils.toBufferedImage(dst);
+            src.release();
+            dst.release();
+            int[] frameRgb = scaled.getRGB(0, 0, scaledWidth, scaledHeight, null, 0, scaledWidth);
+            // Where the frame's top left corner is, in output pixels.
+            double left = (frameArea.getMinX() - area.getMinX()) / mmPerPixel;
+            double top = (area.getMaxY() - frameArea.getMaxY()) / mmPerPixel;
+            for (int py = pixels.y; py < pixels.y + pixels.height; py++) {
+                int sy = clamp((int) Math.floor(py + 0.5 - top), 0, scaledHeight - 1);
+                for (int px = pixels.x; px < pixels.x + pixels.width; px++) {
+                    int i = py * width + px;
+                    if (owner[i] == k) {
+                        int sx = clamp((int) Math.floor(px + 0.5 - left), 0, scaledWidth - 1);
+                        rgb[i] = frameRgb[sy * scaledWidth + sx];
+                    }
+                }
+            }
+        }
+        BufferedImage out = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        out.setRGB(0, 0, width, height, rgb, 0, width);
+        return out;
+    }
+
+    /**
+     * @return the factor from the stored scale of the frame to the scale at viewingPlaneZ.
+     */
+    private static Point2D getScale(TileRecord r, Camera camera, Double viewingPlaneZ) {
+        if (viewingPlaneZ == null || camera == null) {
+            return new Point2D.Double(1, 1);
+        }
+        // Frames stored before the plane was recorded were captured for the default Z.
+        Length storedZ = r.viewingPlaneZ == null ? camera.getDefaultZ()
+                : new Length(r.viewingPlaneZ, LengthUnit.Millimeters);
+        Location stored = camera.getUnitsPerPixel(storedZ)
+                                .convertToUnits(LengthUnit.Millimeters);
+        Location wanted = camera.getUnitsPerPixel(new Length(viewingPlaneZ, LengthUnit.Millimeters))
+                                .convertToUnits(LengthUnit.Millimeters);
+        return new Point2D.Double(wanted.getX() / stored.getX(), wanted.getY() / stored.getY());
+    }
+
+    /**
+     * @return the output pixels a machine area covers, clipped to the output.
+     */
+    private static Rectangle toPixels(Rectangle2D a, Rectangle2D area, double mmPerPixel,
+            int width, int height) {
+        int x0 = (int) Math.floor((a.getMinX() - area.getMinX()) / mmPerPixel);
+        int y0 = (int) Math.floor((area.getMaxY() - a.getMaxY()) / mmPerPixel);
+        int x1 = (int) Math.ceil((a.getMaxX() - area.getMinX()) / mmPerPixel);
+        int y1 = (int) Math.ceil((area.getMaxY() - a.getMinY()) / mmPerPixel);
+        return new Rectangle(x0, y0, x1 - x0, y1 - y0)
+                .intersection(new Rectangle(0, 0, width, height));
+    }
+
+    private static boolean owns(int[] owner, int k, Rectangle pixels, int width) {
+        for (int py = pixels.y; py < pixels.y + pixels.height; py++) {
+            for (int px = pixels.x; px < pixels.x + pixels.width; px++) {
+                if (owner[py * width + px] == k) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static int clamp(int v, int min, int max) {
+        return Math.max(min, Math.min(max, v));
     }
 
     public static List<TileRecord> loadTileRecords(File directory) {

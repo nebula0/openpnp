@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP, Image
 
 CONFIG_DIR = Path(os.environ.get("OPENPNP_CONFIG_DIR", Path.home() / ".openpnp2"))
 TIMEOUT_S = 200  # a little more than the Java side machine task timeout
+JOB_TIMEOUT_S = 920  # a little more than the Java side job timeout
 
 mcp = FastMCP("openpnp")
 
@@ -35,7 +36,7 @@ def _bridge_info():
         )
 
 
-def _call(method, path, query=None, body=None):
+def _call(method, path, query=None, body=None, timeout=None):
     info = _bridge_info()
     url = f"http://127.0.0.1:{info['port']}{path}"
     if query:
@@ -48,7 +49,7 @@ def _call(method, path, query=None, body=None):
         headers={"X-AI-Bridge-Token": info["token"], "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:
+        with urllib.request.urlopen(request, timeout=timeout or TIMEOUT_S) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         # The bridge answers errors with a JSON body too.
@@ -204,12 +205,48 @@ def cancel_bed_map_scan() -> str:
 
 
 @mcp.tool()
+def list_job_placements(job_file: str) -> str:
+    """List the boards and part placements of an OpenPnP job file (.job.xml): boardId,
+    placementId, part, enabled, placed and the machine location of each placement. Only
+    placements whose side matches the board's sideUp can be placed.
+    Reads the file only; the Job tab and the machine are not touched."""
+    return json.dumps(_call("GET", "/job/placements", {"file": job_file}), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def place_from_job(
+    job_file: str,
+    placements: list[dict],
+    reason: str,
+    confirm: bool = False,
+) -> str:
+    """Place parts of a job file with OpenPnP's own job processor: the nozzle with a fitting
+    tip picks from an enabled feeder, bottom vision aligns the part and it is placed on the
+    board, as in a normal job run with only these placements enabled.
+
+    placements: [{"boardId": "Pnl1⇒Brd1", "placementId": "U1"}, ...]; boardId may be its last
+    part ("Brd1") if unique. See list_job_placements. The job file is not changed and the Job
+    tab is not used, so the placed status there stays as it was.
+    MOVES THE MACHINE: first call without confirm to get the plan (placement location, nozzles
+    and feeders), ask the user, and only then call again with confirm=true. Check "warnings":
+    a placement marked as placed may already have a part on the board. After the job the head
+    is parked; on failure the job processor discards what was picked, and nozzlesAfterFailure
+    shows what is left.
+    """
+    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
+    return json.dumps(_call("POST", "/job/place", body=body, timeout=JOB_TIMEOUT_S),
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
 def get_bed_map(
     x_min: float | None = None,
     y_min: float | None = None,
     x_max: float | None = None,
     y_max: float | None = None,
     max_size: int | None = None,
+    z: float | None = None,
+    mm_per_pixel: float | None = None,
 ) -> list:
     """Get the stitched bed map image, whole or a region (machine coordinates in mm).
 
@@ -217,9 +254,18 @@ def get_bed_map(
     coordinates: x = xMin + px * imageMmPerPixel, y = yMax - py * imageMmPerPixel
     (up in the image is +y). max_size limits the longest image side (default and
     maximum 1600 px); ask for a smaller region to see more detail. Does not move the machine.
+
+    The map itself has 0.1 mm per pixel. For a region small enough to show finer than that,
+    the image is stitched anew from the original camera frames (source "frames"), down to
+    about 0.01 mm per pixel, enough to read small parts. mm_per_pixel asks for a coarser
+    resolution. The map is stitched for the plane at viewingPlaneZ; objects at other heights
+    are slightly misaligned at frame borders. Give z (the board or feeder Z) to stitch a
+    region for that height instead.
     """
     query = _region(x_min, y_min, x_max, y_max) or {}
     query["maxSize"] = max_size
+    query["z"] = z
+    query["mmPerPixel"] = mm_per_pixel
     return _with_images(_call("GET", "/bedmap", query))
 
 

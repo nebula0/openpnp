@@ -38,9 +38,11 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -59,19 +61,25 @@ import org.openpnp.bedmap.BedMapScanner;
 import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
+import org.openpnp.model.BoardLocation;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Job;
 import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.model.Part;
+import org.openpnp.model.Placement;
+import org.openpnp.model.PlacementsHolderLocation;
 import org.openpnp.spi.Camera;
 import org.openpnp.spi.Feeder;
 import org.openpnp.spi.Head;
+import org.openpnp.spi.JobProcessor;
 import org.openpnp.spi.Machine;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.util.Cycles;
 import org.openpnp.util.MovableUtils;
 import org.openpnp.util.OpenCvUtils;
+import org.openpnp.util.Utils2D;
 import org.openpnp.util.VisionUtils;
 import org.openpnp.vision.pipeline.CvPipeline;
 import org.openpnp.vision.pipeline.CvStage;
@@ -103,6 +111,10 @@ public class AiBridgeServer {
     public static final String TOKEN_HEADER = "X-AI-Bridge-Token";
 
     private static final long MACHINE_TASK_TIMEOUT_S = 180;
+    /**
+     * Placing a few parts, with fiducials and vision, takes longer than other machine tasks.
+     */
+    private static final long JOB_TIMEOUT_S = 900;
     private static final int MAX_IMAGE_DIMENSION = 800;
     private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
 
@@ -227,6 +239,8 @@ public class AiBridgeServer {
                     return getBedMap(query);
                 case "/bedmap/scan":
                     return getBedMapScanState();
+                case "/job/placements":
+                    return getJobPlacements(query);
             }
         }
         else if (method.equals("POST")) {
@@ -244,6 +258,8 @@ public class AiBridgeServer {
                     return scanBedMap(body);
                 case "/bedmap/scan/cancel":
                     return cancelBedMapScan();
+                case "/job/place":
+                    return placeFromJob(body);
             }
         }
         return null;
@@ -618,6 +634,259 @@ public class AiBridgeServer {
     }
 
     // ---------------------------------------------------------------------------------------
+    // Jobs
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Lists the boards and placements of a job file with their machine locations, without
+     * loading it into the Job tab.
+     *
+     * Query: file (path of the .job.xml)
+     */
+    private JsonObject getJobPlacements(Map<String, String> query) throws Exception {
+        Job job = loadJob(query.get("file"));
+        JsonArray boards = new JsonArray();
+        for (BoardLocation boardLocation : job.getBoardLocations()) {
+            JsonObject b = new JsonObject();
+            b.addProperty("boardId", boardLocation.getUniqueId());
+            b.addProperty("enabled", boardLocation.isEnabled());
+            b.addProperty("sideUp", boardLocation.getGlobalSide()
+                                                 .toString());
+            b.add("location", toJson(boardLocation.getGlobalLocation()));
+            JsonArray placements = new JsonArray();
+            for (Placement placement : boardLocation.getBoard()
+                                                    .getPlacements()) {
+                if (placement.getType() != Placement.Type.Placement) {
+                    continue;
+                }
+                JsonObject p = new JsonObject();
+                p.addProperty("placementId", placement.getId());
+                p.addProperty("partId",
+                        placement.getPart() == null ? null
+                                : placement.getPart()
+                                           .getId());
+                p.addProperty("enabled", placement.isEnabled());
+                p.addProperty("side", placement.getSide()
+                                               .toString());
+                p.addProperty("placed", job.retrievePlacedStatus(boardLocation, placement.getId()));
+                p.add("location", toJson(
+                        Utils2D.calculateBoardPlacementLocation(boardLocation, placement)));
+                placements.add(p);
+            }
+            b.add("placements", placements);
+            boards.add(b);
+        }
+        JsonObject o = ok();
+        o.addProperty("file", job.getFile()
+                                 .getAbsolutePath());
+        o.add("boards", boards);
+        return o;
+    }
+
+    /**
+     * Places parts of a job file with OpenPnP's own job processor, as if only these placements
+     * were enabled and not yet placed: picking, bottom vision, fiducials (where enabled) and
+     * placing all work as in a normal job run. The job is loaded on its own and is neither shown
+     * in the Job tab nor saved, so the placed status in the file does not change.
+     *
+     * Body: {file, placements: [{boardId, placementId}], confirm}. boardId is the board's unique
+     * id such as "Pnl1⇒Brd1", or its last part "Brd1" if that is unique.
+     */
+    private JsonObject placeFromJob(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Job job = loadJob(getString(body, "file"));
+        JsonElement wanted = body.get("placements");
+        if (wanted == null || !wanted.isJsonArray() || wanted.getAsJsonArray()
+                                                             .size() == 0) {
+            throw new BadRequest("Give placements: [{boardId, placementId}, ...].");
+        }
+        Map<BoardLocation, List<Placement>> selected = new LinkedHashMap<>();
+        StringBuilder plan = new StringBuilder();
+        List<String> warnings = new ArrayList<>();
+        for (JsonElement e : wanted.getAsJsonArray()) {
+            if (!e.isJsonObject()) {
+                throw new BadRequest("Each placement must be {boardId, placementId}.");
+            }
+            BoardLocation boardLocation =
+                    findBoardLocation(job, getString(e.getAsJsonObject(), "boardId"));
+            String placementId = getString(e.getAsJsonObject(), "placementId");
+            Placement placement = boardLocation.getBoard()
+                                               .getPlacements()
+                                               .stream()
+                                               .filter(p -> p.getId()
+                                                             .equals(placementId))
+                                               .findFirst()
+                                               .orElseThrow(() -> new BadRequest(
+                                                       "Board " + boardLocation.getUniqueId()
+                                                               + " has no placement "
+                                                               + placementId + "."));
+            if (placement.getType() != Placement.Type.Placement || placement.getPart() == null) {
+                throw new BadRequest("Placement " + placementId + " is not a part placement.");
+            }
+            if (!placement.isEnabled() || !boardLocation.isEnabled()) {
+                throw new BadRequest("Placement " + placementId + " on "
+                        + boardLocation.getUniqueId() + " is disabled in the job.");
+            }
+            if (placement.getSide() != boardLocation.getGlobalSide()) {
+                // The job processor silently skips these.
+                throw new BadRequest("Placement " + placementId + " is on the "
+                        + placement.getSide() + " side, but " + boardLocation.getUniqueId()
+                        + " has its " + boardLocation.getGlobalSide() + " side up.");
+            }
+            if (job.retrievePlacedStatus(boardLocation, placementId)) {
+                warnings.add(boardLocation.getUniqueId() + " " + placementId
+                        + " is marked as placed in the job file. Make sure the board has no part "
+                        + "there yet.");
+            }
+            selected.computeIfAbsent(boardLocation, k -> new ArrayList<>())
+                    .add(placement);
+            plan.append(describePlacement(machine, boardLocation, placement));
+        }
+        plan.append("Uses the OpenPnP job processor (pick, bottom vision, place); "
+                + "afterwards the head is parked.");
+
+        JsonObject gate = gateMotion(machine, body, plan.toString());
+        if (gate != null) {
+            if (!warnings.isEmpty()) {
+                gate.add("warnings", gson.toJsonTree(warnings));
+            }
+            return gate;
+        }
+
+        // Only the selected placements are left to do; everything else counts as placed, and
+        // other boards are disabled so that their fiducials are not checked. This only changes
+        // the job loaded here, never the board definitions or the file.
+        for (BoardLocation boardLocation : job.getBoardLocations()) {
+            if (!selected.containsKey(boardLocation)) {
+                boardLocation.setLocallyEnabled(false);
+            }
+            for (Placement placement : boardLocation.getBoard()
+                                                    .getPlacements()) {
+                List<Placement> list = selected.get(boardLocation);
+                job.storePlacedStatus(boardLocation, placement.getId(),
+                        list == null || !list.contains(placement));
+            }
+        }
+        // Stop at the first error instead of deferring it, so that it can be reported.
+        job.setErrorHandling(Job.ErrorHandling.Alert);
+
+        JsonObject result = runLogged("job/place", body, machine, JOB_TIMEOUT_S, () -> {
+            JobProcessor processor = machine.getPnpJobProcessor();
+            processor.initialize(job);
+            try {
+                while (processor.next()) {
+                    // Each call runs one step of the job.
+                }
+            }
+            catch (Exception e) {
+                try {
+                    // Discards whatever was picked and parks the head.
+                    processor.abort();
+                }
+                catch (Exception e2) {
+                    Logger.warn(e2, "AI bridge could not abort the job");
+                }
+                throw e;
+            }
+            JsonObject o = ok();
+            JsonArray placed = new JsonArray();
+            int missing = 0;
+            for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+                for (Placement placement : entry.getValue()) {
+                    JsonObject p = new JsonObject();
+                    p.addProperty("boardId", entry.getKey()
+                                                  .getUniqueId());
+                    p.addProperty("placementId", placement.getId());
+                    boolean done = job.retrievePlacedStatus(entry.getKey(), placement.getId());
+                    p.addProperty("placed", done);
+                    placed.add(p);
+                    missing += done ? 0 : 1;
+                }
+            }
+            if (missing > 0) {
+                o = error(missing + " placement(s) were not placed, see the OpenPnP log.");
+            }
+            o.add("placements", placed);
+            return o;
+        });
+        if (!warnings.isEmpty()) {
+            result.add("warnings", gson.toJsonTree(warnings));
+        }
+        return result;
+    }
+
+    private String describePlacement(Machine machine, BoardLocation boardLocation,
+            Placement placement) {
+        Part part = placement.getPart();
+        StringBuilder nozzles = new StringBuilder();
+        for (Head head : machine.getHeads()) {
+            for (Nozzle nozzle : head.getNozzles()) {
+                if (nozzle.getNozzleTip() != null && part.getPackage() != null
+                        && part.getPackage()
+                               .getCompatibleNozzleTips()
+                               .contains(nozzle.getNozzleTip())) {
+                    nozzles.append(nozzles.length() == 0 ? "" : ", ")
+                           .append(nozzle.getName())
+                           .append(" (")
+                           .append(nozzle.getNozzleTip()
+                                         .getName())
+                           .append(")");
+                }
+            }
+        }
+        StringBuilder feeders = new StringBuilder();
+        for (Feeder feeder : machine.getFeeders()) {
+            if (feeder.isEnabled() && feeder.getPart() == part) {
+                feeders.append(feeders.length() == 0 ? "" : ", ")
+                       .append(feeder.getName());
+            }
+        }
+        return String.format("Place %s (%s) on %s at %s. Nozzles with a fitting tip: %s. "
+                + "Enabled feeders with this part: %s. ", placement.getId(), part.getId(),
+                boardLocation.getUniqueId(),
+                format(Utils2D.calculateBoardPlacementLocation(boardLocation, placement)),
+                nozzles.length() == 0 ? "none, the job would need a nozzle tip change" : nozzles,
+                feeders.length() == 0 ? "none" : feeders);
+    }
+
+    private static Job loadJob(String file) throws Exception {
+        if (file == null || file.trim()
+                                .isEmpty()) {
+            throw new BadRequest("Give the job file.");
+        }
+        File f = new File(file);
+        if (!f.isFile()) {
+            throw new BadRequest("No job file " + f.getAbsolutePath() + ".");
+        }
+        return Configuration.get()
+                            .loadJob(f);
+    }
+
+    private static BoardLocation findBoardLocation(Job job, String boardId) throws BadRequest {
+        if (boardId == null) {
+            throw new BadRequest("Give boardId.");
+        }
+        List<BoardLocation> matches = new ArrayList<>();
+        for (BoardLocation boardLocation : job.getBoardLocations()) {
+            String id = boardLocation.getUniqueId();
+            if (id.equals(boardId)) {
+                return boardLocation;
+            }
+            if (id.endsWith(PlacementsHolderLocation.ID_DELIMITTER + boardId)
+                    || boardLocation.getId()
+                                    .equals(boardId)) {
+                matches.add(boardLocation);
+            }
+        }
+        if (matches.size() != 1) {
+            throw new BadRequest((matches.isEmpty() ? "No board " : "More than one board ")
+                    + boardId + " in the job. Use the full boardId from list_job_placements.");
+        }
+        return matches.get(0);
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Bed map
     // ---------------------------------------------------------------------------------------
 
@@ -770,6 +1039,17 @@ public class AiBridgeServer {
             maxSize = Math.max(100,
                     Math.min(MAX_BED_MAP_IMAGE_DIMENSION, Integer.parseInt(query.get("maxSize"))));
         }
+        Double z = query.get("z") == null ? null : Double.parseDouble(query.get("z"));
+        Double mmPerPixel = query.get("mmPerPixel") == null ? null
+                : Double.parseDouble(query.get("mmPerPixel"));
+        // Small areas are stitched from the original frames, which have more detail than the map.
+        double fitting = Math.max(area.getWidth(), area.getHeight()) / maxSize;
+        if (z != null || mmPerPixel != null || fitting < map.getMmPerPixel()) {
+            JsonObject detail = getBedMapDetail(map, area, fitting, mmPerPixel, z);
+            if (detail != null) {
+                return detail;
+            }
+        }
         Rectangle pixels = map.toPixelRectangle(area);
         BufferedImage crop = map.crop(area);
         if (crop == null) {
@@ -785,14 +1065,71 @@ public class AiBridgeServer {
         double scale = Math.min(1.0, (double) maxSize / Math.max(crop.getWidth(), crop.getHeight()));
         int width = (int) Math.round(crop.getWidth() * scale);
 
+        return bedMapImage(map, shown, shown.getWidth() / width, "map", info.viewingPlaneZ, crop,
+                maxSize);
+    }
+
+    /**
+     * Stitches an area anew from the original frames of the bed map, or returns null if no stored
+     * frame covers it.
+     *
+     * @param fitting the mm per pixel at which the area fits into the largest image allowed.
+     * @param mmPerPixel the wanted resolution, or null for the finest that fits.
+     * @param z the Z of the plane to stitch for, or null for the plane of the map.
+     */
+    private JsonObject getBedMapDetail(BedMap map, Rectangle2D area, double fitting,
+            Double mmPerPixel, Double z) throws Exception {
+        BedMap.Info info = map.getInfo();
+        List<BedMapScanner.TileRecord> records =
+                BedMapScanner.loadTileRecords(map.getDirectory());
+        double finest = Double.MAX_VALUE;
+        for (BedMapScanner.TileRecord r : records) {
+            finest = Math.min(finest, Math.min(r.mmPerPixelX, r.mmPerPixelY));
+        }
+        if (records.isEmpty()) {
+            return null;
+        }
+        double resolution = Math.max(Math.max(fitting, finest),
+                mmPerPixel == null ? 0 : mmPerPixel);
+        Camera camera = null;
+        if (z != null) {
+            camera = Configuration.get()
+                                  .getMachine()
+                                  .getAllCameras()
+                                  .stream()
+                                  .filter(c -> c.getId()
+                                                .equals(info.cameraId))
+                                  .findFirst()
+                                  .orElseThrow(() -> new BadRequest("Camera " + info.cameraName
+                                          + " that scanned the bed map no longer exists."));
+        }
+        BufferedImage image =
+                BedMapScanner.render(map.getDirectory(), area, resolution, camera, z);
+        if (image == null) {
+            return null;
+        }
+        Rectangle2D shown = new Rectangle2D.Double(area.getMinX(),
+                area.getMaxY() - image.getHeight() * resolution, image.getWidth() * resolution,
+                image.getHeight() * resolution);
+        return bedMapImage(map, shown, resolution, "frames",
+                z == null ? info.viewingPlaneZ : z, image, MAX_BED_MAP_IMAGE_DIMENSION);
+    }
+
+    private JsonObject bedMapImage(BedMap map, Rectangle2D shown, double mmPerPixel,
+            String source, double viewingPlaneZ, BufferedImage image, int maxSize)
+            throws IOException {
+        BedMap.Info info = map.getInfo();
+        JsonObject o = ok();
         o.addProperty("exists", true);
         o.add("mapArea", toJson(map.getBounds()));
         o.add("imageArea", toJson(shown));
-        o.addProperty("imageMmPerPixel", round(shown.getWidth() / width));
+        // More digits than other lengths, since it is multiplied by up to 1600 pixels.
+        o.addProperty("imageMmPerPixel", Math.round(mmPerPixel * 1e7) / 1e7);
         o.addProperty("coordinates",
                 "Image pixel (px, py) is at machine x = imageArea.xMin + px * imageMmPerPixel, "
                         + "y = imageArea.yMax - py * imageMmPerPixel. Up in the image is +y.");
-        o.addProperty("viewingPlaneZ", round(info.viewingPlaneZ));
+        o.addProperty("source", source);
+        o.addProperty("viewingPlaneZ", round(viewingPlaneZ));
         o.addProperty("cameraName", info.cameraName);
         o.addProperty("updated", info.updated == null ? null
                 : new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ").format(info.updated));
@@ -800,7 +1137,7 @@ public class AiBridgeServer {
         JsonObject i = new JsonObject();
         i.addProperty("name", "bedmap");
         i.addProperty("mimeType", "image/png");
-        i.addProperty("data", toPngBase64(crop, maxSize));
+        i.addProperty("data", toPngBase64(image, maxSize));
         images.add(i);
         o.add("images", images);
         return o;
@@ -907,9 +1244,14 @@ public class AiBridgeServer {
      */
     private JsonObject runLogged(String action, JsonObject body, Machine machine,
             Callable<JsonObject> callable) throws Exception {
+        return runLogged(action, body, machine, MACHINE_TASK_TIMEOUT_S, callable);
+    }
+
+    private JsonObject runLogged(String action, JsonObject body, Machine machine, long timeoutS,
+            Callable<JsonObject> callable) throws Exception {
         JsonObject result;
         try {
-            result = runOnMachine(machine, callable);
+            result = runOnMachine(machine, callable, timeoutS);
         }
         catch (Exception e) {
             Logger.warn(e, "AI bridge {} failed", action);
@@ -946,9 +1288,14 @@ public class AiBridgeServer {
     }
 
     private <T> T runOnMachine(Machine machine, Callable<T> callable) throws Exception {
+        return runOnMachine(machine, callable, MACHINE_TASK_TIMEOUT_S);
+    }
+
+    private <T> T runOnMachine(Machine machine, Callable<T> callable, long timeoutS)
+            throws Exception {
         try {
             return machine.submit(callable)
-                          .get(MACHINE_TASK_TIMEOUT_S, TimeUnit.SECONDS);
+                          .get(timeoutS, TimeUnit.SECONDS);
         }
         catch (java.util.concurrent.ExecutionException e) {
             Throwable cause = e.getCause() == null ? e : e.getCause();
