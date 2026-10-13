@@ -70,6 +70,7 @@ import org.openpnp.bedmap.BedMapScanner;
 import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
+import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
 import org.openpnp.model.BoardLocation;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Footprint;
@@ -282,6 +283,10 @@ public class AiBridgeServer {
                     return inspectPlacements(body);
                 case "/camera/capture":
                     return captureCamera(body);
+                case "/feeder/strip/setup":
+                    return setupStripFeeder(body);
+                case "/camera/move":
+                    return moveCamera(body);
             }
         }
         return null;
@@ -707,6 +712,232 @@ public class AiBridgeServer {
         images.add(i);
         o.add("images", images);
         return o;
+    }
+
+    /**
+     * Moves the top camera to a machine X, Y at Safe Z, e.g. back over a feeder after homing.
+     *
+     * Body: {x, y (mm), confirm}
+     */
+    private JsonObject moveCamera(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        JsonElement x = body.get("x");
+        JsonElement y = body.get("y");
+        if (x == null || y == null || x.isJsonNull() || y.isJsonNull()) {
+            throw new BadRequest("Give x and y in mm.");
+        }
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        Location target = camera.getLocation()
+                                .convertToUnits(LengthUnit.Millimeters)
+                                .derive(x.getAsDouble(), y.getAsDouble(), null, null);
+        JsonObject gate = gateMotion(machine, body,
+                "Lift all nozzles to Safe Z and move camera " + camera.getName() + " to X "
+                        + round(target.getX()) + ", Y " + round(target.getY()) + ".");
+        if (gate != null) {
+            return gate;
+        }
+        return runLogged("camera/move", body, machine, () -> {
+            MovableUtils.moveToLocationAtSafeZ(camera, target);
+            JsonObject o = ok();
+            o.add("cameraLocation", toJson(camera.getLocation()
+                                                 .convertToUnits(LengthUnit.Millimeters)));
+            return o;
+        });
+    }
+
+    /**
+     * Sets up a ReferenceStripFeeder for a cut tape strip from one photo where the camera is now,
+     * without moving the machine: finds the sprocket holes and parts, and from those the
+     * reference hole, last hole, feed direction and part pitch. Without create it only returns
+     * the result and an annotated photo; with create it adds the feeder, disabled until its Z
+     * has been checked.
+     *
+     * Body: {partId, tapeWidth (mm, default 8), z (mm, the tape surface; default the camera's
+     * default Z), name (optional), create (default false)}
+     */
+    private JsonObject setupStripFeeder(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        String partId = getString(body, "partId");
+        Part part = partId == null ? null
+                : Configuration.get()
+                               .getPart(partId);
+        if (part == null) {
+            throw new BadRequest("No part " + partId + ".");
+        }
+        JsonElement widthElement = body.get("tapeWidth");
+        double tapeWidth = widthElement == null || widthElement.isJsonNull() ? 8
+                : widthElement.getAsDouble();
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        JsonElement zElement = body.get("z");
+        boolean zGiven = zElement != null && !zElement.isJsonNull();
+        double z = zGiven ? zElement.getAsDouble()
+                : camera.getDefaultZ()
+                        .convertToUnits(LengthUnit.Millimeters)
+                        .getValue();
+
+        BufferedImage frame = runOnMachine(machine, () -> camera.lightSettleAndCapture());
+        Location cameraLocation = camera.getLocation()
+                                        .convertToUnits(LengthUnit.Millimeters);
+        Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))
+                             .convertToUnits(LengthUnit.Millimeters);
+        double cx = frame.getWidth() / 2.0;
+        double cy = frame.getHeight() / 2.0;
+        StripTapeLocator.PixelToMachine toMachine =
+                (px, py) -> new org.opencv.core.Point(
+                        cameraLocation.getX() + (px - cx) * upp.getX(),
+                        cameraLocation.getY() - (py - cy) * upp.getY());
+        Mat color = OpenCvUtils.toMat(frame);
+        Mat gray = new Mat();
+        StripTapeLocator.Result tape;
+        try {
+            Imgproc.cvtColor(color, gray, Imgproc.COLOR_BGR2GRAY);
+            tape = StripTapeLocator.locate(gray, tapeWidth, upp.getX(), toMachine);
+        }
+        catch (Exception e) {
+            JsonObject o = error(describe(e));
+            o.add("images", singleImage("capture", frame, MAX_BED_MAP_IMAGE_DIMENSION));
+            return o;
+        }
+        finally {
+            color.release();
+            gray.release();
+        }
+
+        ReferenceStripFeeder feeder = new ReferenceStripFeeder();
+        String name = getString(body, "name");
+        feeder.setName(name == null ? part.getId() + " strip" : name);
+        feeder.setPart(part);
+        feeder.setTapeWidth(new Length(tapeWidth, LengthUnit.Millimeters));
+        feeder.setPartPitch(new Length(tape.partPitch, LengthUnit.Millimeters));
+        feeder.setReferenceHoleLocation(new Location(LengthUnit.Millimeters,
+                tape.referenceHole.x, tape.referenceHole.y, z, 0));
+        feeder.setLastHoleLocation(new Location(LengthUnit.Millimeters, tape.lastHole.x,
+                tape.lastHole.y, z, 0));
+        feeder.setFeedCount(0);
+        feeder.setEnabled(false);
+
+        JsonArray picks = new JsonArray();
+        List<Location> pickLocations = new ArrayList<>();
+        for (int n = 1; n <= tape.parts.size(); n++) {
+            feeder.setFeedCount(n);
+            Location pick = feeder.getPickLocation()
+                                  .convertToUnits(LengthUnit.Millimeters);
+            pickLocations.add(pick);
+            JsonObject p = toJson(pick).getAsJsonObject();
+            org.opencv.core.Point found = tape.parts.get(n - 1);
+            p.addProperty("partFoundX", round(found.x));
+            p.addProperty("partFoundY", round(found.y));
+            p.addProperty("error", round(Math.hypot(pick.getX() - found.x,
+                    pick.getY() - found.y)));
+            picks.add(p);
+        }
+        feeder.setFeedCount(0);
+
+        JsonObject o = ok();
+        o.addProperty("partId", part.getId());
+        o.addProperty("holesFound", tape.holes.size());
+        o.addProperty("partsFound", tape.parts.size());
+        o.add("referenceHole", toJson(feeder.getReferenceHoleLocation()));
+        o.add("lastHole", toJson(feeder.getLastHoleLocation()));
+        o.addProperty("feedDirectionDegrees",
+                round(Math.toDegrees(Math.atan2(tape.direction.y, tape.direction.x))));
+        o.addProperty("partPitch", tape.partPitch);
+        o.addProperty("tapeWidth", tapeWidth);
+        o.add("pickLocations", picks);
+        o.addProperty("z", z);
+        if (!zGiven) {
+            o.addProperty("zWarning", "Z was not given, the camera default Z was used for the "
+                    + "scale and the pick height. Check it before enabling the feeder.");
+        }
+        o.addProperty("legend", "Holes green, reference hole red, line through the holes "
+                + "yellow, parts found magenta, the feeder's pick locations cyan crosses with "
+                + "their numbers.");
+        o.add("images", singleImage("strip",
+                drawStrip(frame, tape, pickLocations, cameraLocation, upp),
+                MAX_BED_MAP_IMAGE_DIMENSION));
+
+        if (getBoolean(body, "create", false)) {
+            onSwing(() -> {
+                machine.addFeeder(feeder);
+                MainFrame.get()
+                         .getFeedersTab()
+                         .updateView();
+                return null;
+            });
+            o.addProperty("created", true);
+            o.addProperty("feederId", feeder.getId());
+            o.addProperty("feederName", feeder.getName());
+            o.addProperty("enabled", false);
+            logAction("feeder/strip/setup", body, o);
+        }
+        else {
+            o.addProperty("created", false);
+            o.addProperty("message",
+                    "Nothing was changed. Call again with create=true to add the feeder.");
+        }
+        return o;
+    }
+
+    private static JsonArray singleImage(String name, BufferedImage image, int maxDimension)
+            throws IOException {
+        JsonArray images = new JsonArray();
+        JsonObject i = new JsonObject();
+        i.addProperty("name", name);
+        i.addProperty("mimeType", "image/png");
+        i.addProperty("data", toPngBase64(image, maxDimension));
+        images.add(i);
+        return images;
+    }
+
+    private static BufferedImage drawStrip(BufferedImage frame, StripTapeLocator.Result tape,
+            List<Location> picks, Location cameraLocation, Location upp) {
+        BufferedImage out =
+                new BufferedImage(frame.getWidth(), frame.getHeight(), BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.drawImage(frame, 0, 0, null);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setStroke(new BasicStroke(4));
+        double cx = frame.getWidth() / 2.0;
+        double cy = frame.getHeight() / 2.0;
+        java.util.function.Function<double[], Point2D> px =
+                m -> new Point2D.Double(cx + (m[0] - cameraLocation.getX()) / upp.getX(),
+                        cy - (m[1] - cameraLocation.getY()) / upp.getY());
+        double holeRadius = StripTapeLocator.HOLE_DIAMETER / 2 / upp.getX();
+        Point2D first = px.apply(new double[] {tape.holes.get(0).x, tape.holes.get(0).y});
+        Point2D last = px.apply(new double[] {tape.holes.get(tape.holes.size() - 1).x,
+                tape.holes.get(tape.holes.size() - 1).y});
+        g.setColor(Color.yellow);
+        g.draw(new Line2D.Double(first, last));
+        for (org.opencv.core.Point h : tape.holes) {
+            Point2D p = px.apply(new double[] {h.x, h.y});
+            boolean reference = h == tape.referenceHole;
+            g.setColor(reference ? Color.red : Color.green);
+            double r = holeRadius * (reference ? 1.3 : 1.1);
+            g.draw(new Ellipse2D.Double(p.getX() - r, p.getY() - r, 2 * r, 2 * r));
+        }
+        g.setColor(Color.magenta);
+        for (org.opencv.core.Point part : tape.parts) {
+            Point2D p = px.apply(new double[] {part.x, part.y});
+            g.draw(new Ellipse2D.Double(p.getX() - 20, p.getY() - 20, 40, 40));
+        }
+        g.setColor(Color.cyan);
+        g.setFont(g.getFont()
+                   .deriveFont(48f));
+        for (int i = 0; i < picks.size(); i++) {
+            Point2D p = px.apply(new double[] {picks.get(i)
+                                                    .getX(),
+                    picks.get(i)
+                         .getY()});
+            g.draw(new Line2D.Double(p.getX() - 40, p.getY(), p.getX() + 40, p.getY()));
+            g.draw(new Line2D.Double(p.getX(), p.getY() - 40, p.getX(), p.getY() + 40));
+            g.drawString(String.valueOf(i + 1), (float) p.getX() + 50, (float) p.getY() - 20);
+        }
+        g.dispose();
+        return out;
     }
 
     // ---------------------------------------------------------------------------------------

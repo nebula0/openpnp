@@ -285,6 +285,42 @@ def capture_camera(z: float | None = None) -> list:
 
 
 @mcp.tool()
+def move_camera(x: float, y: float, reason: str, confirm: bool = False) -> str:
+    """Move the top camera to machine X, Y (mm), with all nozzles at Safe Z first.
+
+    MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
+    call again with confirm=true. Afterwards all heads are lifted to Safe Z.
+    """
+    body = {"x": x, "y": y, "confirm": confirm, "reason": reason}
+    return json.dumps(_call("POST", "/camera/move", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def setup_strip_feeder(
+    part_id: str,
+    z: float | None = None,
+    tape_width: float = 8,
+    name: str | None = None,
+    create: bool = False,
+) -> list:
+    """Set up a strip (cut tape) feeder from one photo where the top camera is now. Does not
+    move the machine: have the operator jog the camera over the start of the tape first, with
+    at least two sprocket holes, the first part and one more hole beyond it in view.
+
+    Finds the holes and parts and derives the ReferenceStripFeeder settings: reference hole,
+    last hole, feed direction (parts must be left of it, which fixes the direction) and part
+    pitch, and checks that the feeder's pick locations land on the parts found (error, mm).
+    z is the tape surface height, used for the camera scale and as the pick height; without it
+    the camera default Z is used and zWarning says so.
+
+    Without create nothing changes: show the result to the user. With create=true (only after
+    the user agreed) the feeder is added to the machine, disabled until Z has been checked.
+    """
+    body = {"partId": part_id, "z": z, "tapeWidth": tape_width, "name": name, "create": create}
+    return _with_images(_call("POST", "/feeder/strip/setup", body=body))
+
+
+@mcp.tool()
 def get_bed_map(
     x_min: float | None = None,
     y_min: float | None = None,
