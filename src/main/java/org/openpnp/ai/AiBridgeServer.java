@@ -19,9 +19,15 @@
 
 package org.openpnp.ai;
 
+import java.awt.BasicStroke;
+import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.Shape;
+import java.awt.geom.AffineTransform;
+import java.awt.geom.Ellipse2D;
+import java.awt.geom.Line2D;
 import java.awt.geom.Point2D;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
@@ -43,8 +49,10 @@ import java.util.Base64;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +71,7 @@ import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.model.BoardLocation;
 import org.openpnp.model.Configuration;
+import org.openpnp.model.Footprint;
 import org.openpnp.model.Job;
 import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
@@ -92,6 +101,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -118,6 +128,7 @@ public class AiBridgeServer {
     private static final long JOB_TIMEOUT_S = 900;
     private static final int MAX_IMAGE_DIMENSION = 800;
     private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
+    private static final int MIN_INSPECT_IMAGE_DIMENSION = 600;
 
     private static AiBridgeServer instance;
 
@@ -261,6 +272,8 @@ public class AiBridgeServer {
                     return cancelBedMapScan();
                 case "/job/place":
                     return placeFromJob(body);
+                case "/job/inspect":
+                    return inspectPlacements(body);
             }
         }
         return null;
@@ -697,52 +710,13 @@ public class AiBridgeServer {
         Machine machine = Configuration.get()
                                        .getMachine();
         Job job = loadJob(getString(body, "file"));
-        JsonElement wanted = body.get("placements");
-        if (wanted == null || !wanted.isJsonArray() || wanted.getAsJsonArray()
-                                                             .size() == 0) {
-            throw new BadRequest("Give placements: [{boardId, placementId}, ...].");
-        }
-        Map<BoardLocation, List<Placement>> selected = new LinkedHashMap<>();
-        StringBuilder plan = new StringBuilder();
         List<String> warnings = new ArrayList<>();
-        for (JsonElement e : wanted.getAsJsonArray()) {
-            if (!e.isJsonObject()) {
-                throw new BadRequest("Each placement must be {boardId, placementId}.");
+        Map<BoardLocation, List<Placement>> selected = selectPlacements(job, body, true, warnings);
+        StringBuilder plan = new StringBuilder();
+        for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+            for (Placement placement : entry.getValue()) {
+                plan.append(describePlacement(machine, entry.getKey(), placement));
             }
-            BoardLocation boardLocation =
-                    findBoardLocation(job, getString(e.getAsJsonObject(), "boardId"));
-            String placementId = getString(e.getAsJsonObject(), "placementId");
-            Placement placement = boardLocation.getBoard()
-                                               .getPlacements()
-                                               .stream()
-                                               .filter(p -> p.getId()
-                                                             .equals(placementId))
-                                               .findFirst()
-                                               .orElseThrow(() -> new BadRequest(
-                                                       "Board " + boardLocation.getUniqueId()
-                                                               + " has no placement "
-                                                               + placementId + "."));
-            if (placement.getType() != Placement.Type.Placement || placement.getPart() == null) {
-                throw new BadRequest("Placement " + placementId + " is not a part placement.");
-            }
-            if (!placement.isEnabled() || !boardLocation.isEnabled()) {
-                throw new BadRequest("Placement " + placementId + " on "
-                        + boardLocation.getUniqueId() + " is disabled in the job.");
-            }
-            if (placement.getSide() != boardLocation.getGlobalSide()) {
-                // The job processor silently skips these.
-                throw new BadRequest("Placement " + placementId + " is on the "
-                        + placement.getSide() + " side, but " + boardLocation.getUniqueId()
-                        + " has its " + boardLocation.getGlobalSide() + " side up.");
-            }
-            if (job.retrievePlacedStatus(boardLocation, placementId)) {
-                warnings.add(boardLocation.getUniqueId() + " " + placementId
-                        + " is marked as placed in the job file. Make sure the board has no part "
-                        + "there yet.");
-            }
-            selected.computeIfAbsent(boardLocation, k -> new ArrayList<>())
-                    .add(placement);
-            plan.append(describePlacement(machine, boardLocation, placement));
         }
         plan.append("Uses the OpenPnP job processor (pick, bottom vision, place); "
                 + "afterwards the head is parked.");
@@ -867,6 +841,250 @@ public class AiBridgeServer {
             }
         }
         return true;
+    }
+
+    /**
+     * Moves the top camera over placements of a job file and returns a photo of each, with the
+     * part's footprint drawn where the job expects it: body outline in green, pads in cyan and
+     * pin 1 in red. Offsets, rotation, polarity and missing parts can then be judged by eye.
+     *
+     * Body: {file, placements: [{boardId, placementId}], confirm}
+     */
+    private JsonObject inspectPlacements(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Job job = loadJob(getString(body, "file"));
+        Map<BoardLocation, List<Placement>> selected =
+                selectPlacements(job, body, false, new ArrayList<>());
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        // Like the job processor, locate the boards and panels that check fiducials first, outer
+        // panels before what they contain, so that the expected locations match the real board.
+        Set<PlacementsHolderLocation<?>> fiducialLocations = new LinkedHashSet<>();
+        for (BoardLocation boardLocation : selected.keySet()) {
+            List<PlacementsHolderLocation<?>> chain = new ArrayList<>();
+            for (PlacementsHolderLocation<?> l = boardLocation; l != null; l = l.getParent()) {
+                chain.add(0, l);
+            }
+            for (PlacementsHolderLocation<?> l : chain) {
+                if (l.isCheckFiducials()) {
+                    fiducialLocations.add(l);
+                }
+            }
+        }
+        StringBuilder plan = new StringBuilder("Move camera " + camera.getName() + " at Safe Z "
+                + (fiducialLocations.isEmpty() ? ""
+                        : "over the fiducials of " + fiducialLocations.size()
+                                + " board(s)/panel(s), then ")
+                + "over each placement and take a photo, no pick or place: ");
+        for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+            for (Placement placement : entry.getValue()) {
+                plan.append(entry.getKey()
+                                 .getUniqueId())
+                    .append(" ")
+                    .append(placement.getId())
+                    .append(" at ")
+                    .append(format(
+                            Utils2D.calculateBoardPlacementLocation(entry.getKey(), placement)))
+                    .append("; ");
+            }
+        }
+        JsonObject gate = gateMotion(machine, body, plan.toString());
+        if (gate != null) {
+            return gate;
+        }
+
+        return runLogged("job/inspect", body, machine, JOB_TIMEOUT_S, () -> {
+            JsonArray fiducialsChecked = new JsonArray();
+            if (!fiducialLocations.isEmpty()) {
+                machine.getFiducialLocator()
+                       .locateAllPlacementsHolder(new ArrayList<>(fiducialLocations), null);
+                for (PlacementsHolderLocation<?> l : fiducialLocations) {
+                    fiducialsChecked.add(new JsonPrimitive(l.getUniqueId()));
+                }
+            }
+            JsonArray results = new JsonArray();
+            JsonArray images = new JsonArray();
+            for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+                for (Placement placement : entry.getValue()) {
+                    Location location =
+                            Utils2D.calculateBoardPlacementLocation(entry.getKey(), placement)
+                                   .convertToUnits(LengthUnit.Millimeters);
+                    // The camera Z only sets the viewing plane, for the right scale.
+                    MovableUtils.moveToLocationAtSafeZ(camera,
+                            camera.getLocation()
+                                  .convertToUnits(LengthUnit.Millimeters)
+                                  .derive(location.getX(), location.getY(), location.getZ(),
+                                          null));
+                    BufferedImage frame = camera.lightSettleAndCapture();
+                    Location upp = camera.getUnitsPerPixelAtZ()
+                                         .convertToUnits(LengthUnit.Millimeters);
+                    String name = entry.getKey()
+                                       .getUniqueId()
+                            + " " + placement.getId();
+                    JsonObject r = new JsonObject();
+                    r.addProperty("boardId", entry.getKey()
+                                                  .getUniqueId());
+                    r.addProperty("placementId", placement.getId());
+                    r.addProperty("partId", placement.getPart()
+                                                     .getId());
+                    r.add("expectedLocation", toJson(location));
+                    r.addProperty("image", name);
+                    results.add(r);
+                    JsonObject i = new JsonObject();
+                    i.addProperty("name", name);
+                    i.addProperty("mimeType", "image/png");
+                    i.addProperty("data",
+                            toPngBase64(drawExpectedFootprint(frame, placement, location, upp),
+                                    MAX_IMAGE_DIMENSION));
+                    images.add(i);
+                }
+            }
+            JsonObject o = ok();
+            o.add("fiducialsChecked", fiducialsChecked);
+            o.add("placements", results);
+            o.addProperty("legend", "Drawn where the job expects the part: body outline green, "
+                    + "pads cyan, pin 1 red dot, image center (camera position) yellow cross.");
+            o.add("images", images);
+            return o;
+        });
+    }
+
+    /**
+     * Draws the footprint of the placement's part where it is expected, on a copy of a frame
+     * taken with the camera centered on the expected location, and crops it to the part with
+     * some margin.
+     */
+    private static BufferedImage drawExpectedFootprint(BufferedImage frame, Placement placement,
+            Location location, Location upp) {
+        Part part = placement.getPart();
+        Footprint footprint =
+                part.getPackage() == null ? null : part.getPackage()
+                                                       .getFootprint();
+        double cx = frame.getWidth() / 2.0;
+        double cy = frame.getHeight() / 2.0;
+        BufferedImage out =
+                new BufferedImage(frame.getWidth(), frame.getHeight(), BufferedImage.TYPE_INT_RGB);
+        Graphics2D g = out.createGraphics();
+        g.drawImage(frame, 0, 0, null);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        Rectangle2D extent = new Rectangle2D.Double(cx - 1 / upp.getX(), cy - 1 / upp.getY(),
+                2 / upp.getX(), 2 / upp.getY());
+        if (footprint != null) {
+            // Footprint units -> mm, rotated as placed -> image pixels around the image center,
+            // which is where the camera, and so the expected part center, is.
+            double mm = new Length(1, footprint.getUnits()).convertToUnits(LengthUnit.Millimeters)
+                                                           .getValue();
+            AffineTransform tx = new AffineTransform();
+            tx.translate(cx, cy);
+            tx.scale(1 / upp.getX(), -1 / upp.getY());
+            tx.rotate(Math.toRadians(location.getRotation()));
+            tx.scale(mm, mm);
+            Shape bodyShape = tx.createTransformedShape(footprint.getBodyShape());
+            Shape padsShape = tx.createTransformedShape(footprint.getPadsShape());
+            extent = bodyShape.getBounds2D()
+                              .createUnion(padsShape.getBounds2D());
+            float stroke =
+                    (float) Math.max(2, Math.max(extent.getWidth(), extent.getHeight()) / 300);
+            g.setStroke(new BasicStroke(stroke));
+            g.setColor(new Color(0, 255, 255, 200));
+            g.draw(padsShape);
+            g.setColor(new Color(0, 255, 0, 220));
+            g.draw(bodyShape);
+            for (Footprint.Pad pad : footprint.getPads()) {
+                if ("1".equals(pad.getName())) {
+                    Point2D p = tx.transform(new Point2D.Double(pad.getX(), pad.getY()), null);
+                    double r = stroke * 4;
+                    g.setColor(new Color(255, 0, 0, 220));
+                    g.fill(new Ellipse2D.Double(p.getX() - r, p.getY() - r, 2 * r, 2 * r));
+                }
+            }
+        }
+        double arm = Math.max(extent.getWidth(), extent.getHeight()) / 15;
+        g.setStroke(new BasicStroke((float) Math.max(2, arm / 10)));
+        g.setColor(new Color(255, 255, 0, 220));
+        g.draw(new Line2D.Double(cx - arm, cy, cx + arm, cy));
+        g.draw(new Line2D.Double(cx, cy - arm, cx, cy + arm));
+        g.dispose();
+
+        // Crop around the part, with a margin of half its size, but at least 1.5 mm.
+        double margin =
+                Math.max(Math.max(extent.getWidth(), extent.getHeight()) / 2, 1.5 / upp.getX());
+        Rectangle crop = new Rectangle((int) Math.floor(extent.getMinX() - margin),
+                (int) Math.floor(extent.getMinY() - margin),
+                (int) Math.ceil(extent.getWidth() + 2 * margin),
+                (int) Math.ceil(extent.getHeight() + 2 * margin))
+                        .intersection(new Rectangle(0, 0, frame.getWidth(), frame.getHeight()));
+        BufferedImage cropped = out.getSubimage(crop.x, crop.y, crop.width, crop.height);
+        // Small parts on a low resolution camera give tiny crops, enlarge them to be readable.
+        double enlarge = (double) MIN_INSPECT_IMAGE_DIMENSION / Math.max(crop.width, crop.height);
+        if (enlarge <= 1) {
+            return cropped;
+        }
+        int w = (int) Math.round(crop.width * enlarge);
+        int h = (int) Math.round(crop.height * enlarge);
+        BufferedImage enlarged = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2 = enlarged.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g2.drawImage(cropped, 0, 0, w, h, null);
+        g2.dispose();
+        return enlarged;
+    }
+
+    /**
+     * Reads the placements: [{boardId, placementId}] of a request.
+     *
+     * @param forPlacing also require the placements to be enabled, and warn about those marked
+     *        as placed.
+     */
+    private static Map<BoardLocation, List<Placement>> selectPlacements(Job job, JsonObject body,
+            boolean forPlacing, List<String> warnings) throws BadRequest {
+        JsonElement wanted = body.get("placements");
+        if (wanted == null || !wanted.isJsonArray() || wanted.getAsJsonArray()
+                                                             .size() == 0) {
+            throw new BadRequest("Give placements: [{boardId, placementId}, ...].");
+        }
+        Map<BoardLocation, List<Placement>> selected = new LinkedHashMap<>();
+        for (JsonElement e : wanted.getAsJsonArray()) {
+            if (!e.isJsonObject()) {
+                throw new BadRequest("Each placement must be {boardId, placementId}.");
+            }
+            BoardLocation boardLocation =
+                    findBoardLocation(job, getString(e.getAsJsonObject(), "boardId"));
+            String placementId = getString(e.getAsJsonObject(), "placementId");
+            Placement placement = boardLocation.getBoard()
+                                               .getPlacements()
+                                               .stream()
+                                               .filter(p -> p.getId()
+                                                             .equals(placementId))
+                                               .findFirst()
+                                               .orElseThrow(() -> new BadRequest(
+                                                       "Board " + boardLocation.getUniqueId()
+                                                               + " has no placement "
+                                                               + placementId + "."));
+            if (placement.getType() != Placement.Type.Placement || placement.getPart() == null) {
+                throw new BadRequest("Placement " + placementId + " is not a part placement.");
+            }
+            if (forPlacing && (!placement.isEnabled() || !boardLocation.isEnabled())) {
+                throw new BadRequest("Placement " + placementId + " on "
+                        + boardLocation.getUniqueId() + " is disabled in the job.");
+            }
+            if (placement.getSide() != boardLocation.getGlobalSide()) {
+                // The job processor silently skips these, and the top camera cannot see them.
+                throw new BadRequest("Placement " + placementId + " is on the "
+                        + placement.getSide() + " side, but " + boardLocation.getUniqueId()
+                        + " has its " + boardLocation.getGlobalSide() + " side up.");
+            }
+            if (forPlacing && job.retrievePlacedStatus(boardLocation, placementId)) {
+                warnings.add(boardLocation.getUniqueId() + " " + placementId
+                        + " is marked as placed in the job file. Make sure the board has no part "
+                        + "there yet.");
+            }
+            selected.computeIfAbsent(boardLocation, k -> new ArrayList<>())
+                    .add(placement);
+        }
+        return selected;
     }
 
     private String describePlacement(Machine machine, BoardLocation boardLocation,

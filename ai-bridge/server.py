@@ -242,6 +242,26 @@ def place_from_job(
 
 
 @mcp.tool()
+def inspect_placements(
+    job_file: str,
+    placements: list[dict],
+    reason: str,
+    confirm: bool = False,
+) -> list:
+    """Photograph placed parts to check them: the top camera moves over each placement of a
+    job file and takes a photo, with the part's footprint drawn where the job expects it
+    (body outline green, pads cyan, pin 1 red dot, camera center yellow cross). Compare the
+    real part with the drawing for offset, rotation, polarity (pin 1) and missing parts.
+
+    placements: [{"boardId": "Pnl1⇒Brd1", "placementId": "U1"}, ...] as for place_from_job.
+    MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
+    to get the plan, ask the user, and only then call again with confirm=true.
+    """
+    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
+    return _with_images(_call("POST", "/job/inspect", body=body, timeout=JOB_TIMEOUT_S))
+
+
+@mcp.tool()
 def get_bed_map(
     x_min: float | None = None,
     y_min: float | None = None,
