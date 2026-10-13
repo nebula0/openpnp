@@ -755,7 +755,8 @@ public class AiBridgeServer {
      * has been checked.
      *
      * Body: {partId, tapeWidth (mm, default 8), z (mm, the tape surface; default the camera's
-     * default Z), name (optional), create (default false)}
+     * default Z), rotationInTape (degrees, default 0), name (optional), create (default
+     * false)}
      */
     private JsonObject setupStripFeeder(JsonObject body) throws Exception {
         Machine machine = Configuration.get()
@@ -823,6 +824,11 @@ public class AiBridgeServer {
                 tape.lastHole.y, z, 0));
         feeder.setFeedCount(0);
         feeder.setEnabled(false);
+        // The feeder's own location only carries the rotation of the part in the tape.
+        JsonElement rotationElement = body.get("rotationInTape");
+        double rotationInTape = rotationElement == null || rotationElement.isJsonNull() ? 0
+                : rotationElement.getAsDouble();
+        feeder.setLocation(new Location(LengthUnit.Millimeters, 0, 0, 0, rotationInTape));
 
         JsonArray picks = new JsonArray();
         List<Location> pickLocations = new ArrayList<>();
@@ -850,6 +856,7 @@ public class AiBridgeServer {
         o.addProperty("feedDirectionDegrees",
                 round(Math.toDegrees(Math.atan2(tape.direction.y, tape.direction.x))));
         o.addProperty("partPitch", tape.partPitch);
+        o.addProperty("rotationInTape", rotationInTape);
         o.addProperty("tapeWidth", tapeWidth);
         o.add("pickLocations", picks);
         o.addProperty("z", z);

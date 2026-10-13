@@ -300,6 +300,7 @@ def setup_strip_feeder(
     part_id: str,
     z: float | None = None,
     tape_width: float = 8,
+    rotation_in_tape: float = 0,
     name: str | None = None,
     create: bool = False,
 ) -> list:
@@ -311,12 +312,15 @@ def setup_strip_feeder(
     last hole, feed direction (parts must be left of it, which fixes the direction) and part
     pitch, and checks that the feeder's pick locations land on the parts found (error, mm).
     z is the tape surface height, used for the camera scale and as the pick height; without it
-    the camera default Z is used and zWarning says so.
+    the camera default Z is used and zWarning says so. rotation_in_tape (degrees) is the
+    feeder's Rotation in Tape: check that the pick rotation matches how the parts lie in the
+    photo relative to the package footprint.
 
     Without create nothing changes: show the result to the user. With create=true (only after
     the user agreed) the feeder is added to the machine, disabled until Z has been checked.
     """
-    body = {"partId": part_id, "z": z, "tapeWidth": tape_width, "name": name, "create": create}
+    body = {"partId": part_id, "z": z, "tapeWidth": tape_width, "rotationInTape": rotation_in_tape,
+            "name": name, "create": create}
     return _with_images(_call("POST", "/feeder/strip/setup", body=body))
 
 
