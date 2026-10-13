@@ -272,6 +272,19 @@ def inspect_placements(
 
 
 @mcp.tool()
+def capture_camera(z: float | None = None) -> list:
+    """Take a photo with the top camera where it is now. Does not move the machine.
+
+    Returns the image with the camera location and scale: pixel (px, py) of the returned
+    image is at machine x = cameraLocation.x + (px / imageScale - frameWidth / 2) * mmPerPixelX,
+    y = cameraLocation.y - (py / imageScale - frameHeight / 2) * mmPerPixelY (up is +y).
+    z is the height of what is looked at (e.g. the feeder or board surface), for the right
+    scale; default the camera's default Z. The original frame is saved (frameFile).
+    """
+    return _with_images(_call("POST", "/camera/capture", body={"z": z}))
+
+
+@mcp.tool()
 def get_bed_map(
     x_min: float | None = None,
     y_min: float | None = None,

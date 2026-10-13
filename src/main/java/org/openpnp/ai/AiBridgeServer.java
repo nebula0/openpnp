@@ -280,6 +280,8 @@ public class AiBridgeServer {
                     return placeFromJob(body);
                 case "/job/inspect":
                     return inspectPlacements(body);
+                case "/camera/capture":
+                    return captureCamera(body);
             }
         }
         return null;
@@ -651,6 +653,60 @@ public class AiBridgeServer {
                             .getId());
             return o;
         });
+    }
+
+    /**
+     * Takes a photo with the top camera where it is, without moving the machine, and returns it
+     * with the camera location and scale, so that pixels can be converted to machine coordinates.
+     * The original frame is kept in the captures directory.
+     *
+     * Body: {z (optional, mm): the height of what is looked at, for the scale; default the
+     * camera's default Z}
+     */
+    private JsonObject captureCamera(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        JsonElement zElement = body.get("z");
+        Length z = zElement == null || zElement.isJsonNull() ? camera.getDefaultZ()
+                : new Length(zElement.getAsDouble(), LengthUnit.Millimeters);
+        BufferedImage frame = runOnMachine(machine, () -> camera.lightSettleAndCapture());
+        Location location = camera.getLocation()
+                                  .convertToUnits(LengthUnit.Millimeters);
+        Location upp = camera.getUnitsPerPixel(z)
+                             .convertToUnits(LengthUnit.Millimeters);
+        File directory = new File(bridgeDirectory, "captures");
+        directory.mkdirs();
+        File file = new File(directory,
+                new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date()) + ".png");
+        ImageIO.write(frame, "png", file);
+
+        JsonObject o = ok();
+        o.addProperty("cameraName", camera.getName());
+        o.add("cameraLocation", toJson(location));
+        o.addProperty("viewingPlaneZ", round(z.convertToUnits(LengthUnit.Millimeters)
+                                              .getValue()));
+        o.addProperty("mmPerPixelX", upp.getX());
+        o.addProperty("mmPerPixelY", upp.getY());
+        o.addProperty("frameWidth", frame.getWidth());
+        o.addProperty("frameHeight", frame.getHeight());
+        double scale = Math.min(1.0,
+                (double) MAX_BED_MAP_IMAGE_DIMENSION / Math.max(frame.getWidth(),
+                        frame.getHeight()));
+        o.addProperty("imageScale", scale);
+        o.addProperty("coordinates", "Image pixel (px, py) is at machine x = cameraLocation.x + "
+                + "(px / imageScale - frameWidth / 2) * mmPerPixelX, y = cameraLocation.y - "
+                + "(py / imageScale - frameHeight / 2) * mmPerPixelY. Up in the image is +y.");
+        o.addProperty("frameFile", file.getAbsolutePath());
+        JsonArray images = new JsonArray();
+        JsonObject i = new JsonObject();
+        i.addProperty("name", "capture");
+        i.addProperty("mimeType", "image/png");
+        i.addProperty("data", toPngBase64(frame, MAX_BED_MAP_IMAGE_DIMENSION));
+        images.add(i);
+        o.add("images", images);
+        return o;
     }
 
     // ---------------------------------------------------------------------------------------
