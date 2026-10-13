@@ -219,6 +219,7 @@ def place_from_job(
     placements: list[dict],
     reason: str,
     confirm: bool = False,
+    max_part_failures: int | None = None,
 ) -> str:
     """Place parts of a job file with OpenPnP's own job processor: the nozzle with a fitting
     tip picks from an enabled feeder, bottom vision aligns the part and it is placed on the
@@ -233,10 +234,13 @@ def place_from_job(
     is parked. If a feeder finds no part, OpenPnP disables it and the remaining placements are
     run again with the next enabled feeder, until all are placed or no feeder is left
     (feedersDisabled lists them; re-enable them in the Feeders tab later). The result always
-    lists which placements were placed. On failure the job processor discards what was
-    picked, and nozzlesAfterFailure shows what is left.
+    lists which placements were placed. If a picked part fails, e.g. bottom vision finds it
+    too far off, it is discarded and the next part is picked, until max_part_failures parts
+    (default 5) fail in a row; partsRejected lists why. On failure the job processor discards
+    what was picked, and nozzlesAfterFailure shows what is left.
     """
-    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
+    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason,
+            "maxPartFailures": max_part_failures}
     return json.dumps(_call("POST", "/job/place", body=body, timeout=JOB_TIMEOUT_S),
                       ensure_ascii=False, indent=1)
 

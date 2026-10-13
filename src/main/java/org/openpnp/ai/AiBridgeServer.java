@@ -127,6 +127,11 @@ public class AiBridgeServer {
      * Placing a few parts, with fiducials and vision, takes longer than other machine tasks.
      */
     private static final long JOB_TIMEOUT_S = 900;
+    /**
+     * How many picked parts in a row may fail, e.g. in bottom vision, before place_from_job
+     * stops instead of picking the next one.
+     */
+    private static final int DEFAULT_MAX_PART_FAILURES = 5;
     private static final int MAX_IMAGE_DIMENSION = 800;
     private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
     private static final int MIN_INSPECT_IMAGE_DIMENSION = 600;
@@ -746,12 +751,24 @@ public class AiBridgeServer {
         }
         // Stop at the first error instead of deferring it, so that it can be reported.
         job.setErrorHandling(Job.ErrorHandling.Alert);
+        JsonElement maxFailures = body.get("maxPartFailures");
+        int maxPartFailures = maxFailures == null || maxFailures.isJsonNull()
+                ? DEFAULT_MAX_PART_FAILURES
+                : Math.max(1, maxFailures.getAsInt());
 
         JsonObject result = runLogged("job/place", body, machine, JOB_TIMEOUT_S, () -> {
             JobProcessor processor = machine.getPnpJobProcessor();
             List<String> disabledFeeders = new ArrayList<>();
+            List<String> rejectedParts = new ArrayList<>();
+            int failuresInARow = 0;
             String error = null;
+            int placedBefore = countPlaced(job, selected);
             while (true) {
+                int placedNow = countPlaced(job, selected);
+                if (placedNow > placedBefore) {
+                    failuresInARow = 0;
+                    placedBefore = placedNow;
+                }
                 processor.initialize(job);
                 try {
                     while (processor.next()) {
@@ -781,6 +798,21 @@ public class AiBridgeServer {
                             continue;
                         }
                     }
+                    // A picked part that failed, e.g. bottom vision found it too far off, has
+                    // been discarded by abort(). Pick the next one, unless that keeps failing,
+                    // which points at a problem with the machine rather than the parts.
+                    else if (source instanceof Part && nozzlesEmpty(machine)) {
+                        rejectedParts.add(error);
+                        failuresInARow++;
+                        if (failuresInARow < maxPartFailures
+                                && hasFeedersLeft(machine, job, selected)) {
+                            continue;
+                        }
+                        if (failuresInARow >= maxPartFailures) {
+                            error = maxPartFailures + " parts in a row failed, stopped. Last: "
+                                    + error;
+                        }
+                    }
                     break;
                 }
             }
@@ -808,6 +840,7 @@ public class AiBridgeServer {
             }
             o.add("placements", placed);
             o.add("feedersDisabled", gson.toJsonTree(disabledFeeders));
+            o.add("partsRejected", gson.toJsonTree(rejectedParts));
             return o;
         });
         if (!"ok".equals(getString(result, "status")) && !result.has("nozzlesAfterFailure")) {
@@ -817,6 +850,27 @@ public class AiBridgeServer {
             result.add("warnings", gson.toJsonTree(warnings));
         }
         return result;
+    }
+
+    private static int countPlaced(Job job, Map<BoardLocation, List<Placement>> selected) {
+        int n = 0;
+        for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+            for (Placement placement : entry.getValue()) {
+                n += job.retrievePlacedStatus(entry.getKey(), placement.getId()) ? 1 : 0;
+            }
+        }
+        return n;
+    }
+
+    private static boolean nozzlesEmpty(Machine machine) {
+        for (Head head : machine.getHeads()) {
+            for (Nozzle nozzle : head.getNozzles()) {
+                if (nozzle.getPart() != null) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /**
