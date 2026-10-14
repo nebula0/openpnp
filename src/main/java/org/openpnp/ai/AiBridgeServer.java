@@ -298,6 +298,8 @@ public class AiBridgeServer {
                     return moveCamera(body);
                 case "/feeder/probe-z":
                     return probeFeederZ(body);
+                case "/feeder/update":
+                    return updateFeeder(body);
             }
         }
         return null;
@@ -755,7 +757,12 @@ public class AiBridgeServer {
         double floorZ = getDouble(body, "floorZ", expectedZ - 1);
         double step = getDouble(body, "step", 0.05);
         int settleMs = (int) getDouble(body, "settleMs", 150);
+        double drop = getDouble(body, "contactDrop", Double.NaN);
+        Double contactDrop = Double.isNaN(drop) ? null : drop;
         boolean apply = getBoolean(body, "apply", false);
+        if (contactDrop != null && (contactDrop < 2 || contactDrop > 100)) {
+            throw new BadRequest("contactDrop must be between 2 and 100.");
+        }
         if (step < 0.01 || step > 0.2) {
             throw new BadRequest("step must be between 0.01 and 0.2 mm.");
         }
@@ -796,9 +803,9 @@ public class AiBridgeServer {
                 nozzle.waitForCompletion(CompletionType.WaitForStillstand);
                 Thread.sleep(Math.max(settleMs, 300));
                 double baseline = nozzle.readVacuumLevel();
-                threshold = contactThreshold(tip, baseline);
+                threshold = contactThreshold(tip, baseline, contactDrop);
                 readings.add(reading(startZ, baseline));
-                if (baseline <= threshold + 2) {
+                if (baseline - threshold < 2) {
                     throw new Exception("The vacuum level " + baseline + " with the tip in the "
                             + "air is too close to the contact threshold " + threshold
                             + " to tell contact. Is the tip blocked or already touching?");
@@ -890,13 +897,75 @@ public class AiBridgeServer {
     }
 
     /**
-     * The vacuum level at or below which the tip counts as sealed: between the tip's part on
-     * and part off ranges if they are set, otherwise a fixed drop from the level in the air.
+     * Enables or disables a feeder and/or sets its pick Z (strip feeders only). Does not move the
+     * machine.
      */
-    private static double contactThreshold(ReferenceNozzleTip tip, double baseline) {
+    private JsonObject updateFeeder(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Feeder feeder = requireFeeder(machine, body);
+        JsonElement enabledElement = body.get("enabled");
+        Boolean enabled = enabledElement == null || enabledElement.isJsonNull() ? null
+                : enabledElement.getAsBoolean();
+        double zValue = getDouble(body, "z", Double.NaN);
+        Double z = Double.isNaN(zValue) ? null : zValue;
+        if (enabled == null && z == null) {
+            throw new BadRequest("Give enabled and/or z.");
+        }
+        if (z != null && !(feeder instanceof ReferenceStripFeeder)) {
+            throw new BadRequest("Setting z is only supported for ReferenceStripFeeder so far.");
+        }
+        JsonObject o = ok();
+        o.addProperty("feederId", feeder.getId());
+        o.addProperty("feederName", feeder.getName());
+        o.addProperty("enabledBefore", feeder.isEnabled());
+        if (feeder instanceof ReferenceStripFeeder) {
+            Location reference = ((ReferenceStripFeeder) feeder).getReferenceHoleLocation()
+                                                                .convertToUnits(
+                                                                        LengthUnit.Millimeters);
+            o.addProperty("zBefore", round(reference.getZ()));
+        }
+        onSwing(() -> {
+            if (z != null) {
+                ReferenceStripFeeder strip = (ReferenceStripFeeder) feeder;
+                Location reference = strip.getReferenceHoleLocation()
+                                          .convertToUnits(LengthUnit.Millimeters);
+                Location last = strip.getLastHoleLocation()
+                                     .convertToUnits(LengthUnit.Millimeters);
+                strip.setReferenceHoleLocation(reference.derive(null, null, z, null));
+                strip.setLastHoleLocation(last.derive(null, null, z, null));
+            }
+            if (enabled != null) {
+                feeder.setEnabled(enabled);
+            }
+            MainFrame.get()
+                     .getFeedersTab()
+                     .updateView();
+            return null;
+        });
+        o.addProperty("enabled", feeder.isEnabled());
+        if (z != null) {
+            o.addProperty("z", round(z));
+        }
+        logAction("feeder/update", body, o);
+        return o;
+    }
+
+    /**
+     * The vacuum level at or below which the tip counts as sealed: contactDrop below the level
+     * in the air if given. Otherwise between the tip's part on and part off ranges, if they are
+     * set and the level in the air is in the part off range (on some machines they are unused
+     * defaults that do not fit the tip), else 10 below the level in the air.
+     */
+    private static double contactThreshold(ReferenceNozzleTip tip, double baseline,
+            Double contactDrop) {
+        if (contactDrop != null) {
+            return baseline - contactDrop;
+        }
         double onHigh = tip.getVacuumLevelPartOnHigh();
         double offLow = tip.getVacuumLevelPartOffLow();
-        if (onHigh > 0 && offLow > onHigh) {
+        double offHigh = tip.getVacuumLevelPartOffHigh();
+        if (onHigh > 0 && offLow > onHigh && baseline >= offLow && baseline <= offHigh) {
             return (onHigh + offLow) / 2;
         }
         return baseline - 10;

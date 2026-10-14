@@ -305,6 +305,7 @@ def probe_feeder_z(
     floor_z: float | None = None,
     step: float = 0.05,
     settle_ms: int = 150,
+    contact_drop: float | None = None,
     apply: bool = False,
 ) -> str:
     """Measure a feeder's pick Z by touching its next part with a nozzle and the vacuum sensor.
@@ -315,16 +316,32 @@ def probe_feeder_z(
     4 mm below start_z). At contact the vacuum is turned off before lifting so the part stays in
     the tape. Choose floor_z conservatively: if the tip misses the part it goes all the way down.
     nozzle_id defaults to the first nozzle with a tip that fits the part. With apply=true (strip
-    feeders only) the measured contactZ becomes the feeder's Z.
+    feeders only) the measured contactZ becomes the feeder's Z. The threshold is contact_drop
+    below the level read in the air at start_z; without contact_drop it is between the tip's part
+    on/off ranges when the air level is in the part off range, else 10 below the air level.
 
     MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
     call again with confirm=true. Check partStuckOnNozzle afterwards: if true, a part is on the
     nozzle with the vacuum kept on, discard it. readings lists Z and vacuum level per step.
     """
     body = {"feederId": feeder_id, "confirm": confirm, "nozzleId": nozzle_id, "startZ": start_z,
-            "floorZ": floor_z, "step": step, "settleMs": settle_ms, "apply": apply,
-            "reason": reason}
+            "floorZ": floor_z, "step": step, "settleMs": settle_ms,
+            "contactDrop": contact_drop, "apply": apply, "reason": reason}
     return json.dumps(_call("POST", "/feeder/probe-z", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def update_feeder(
+    feeder_id: str,
+    reason: str,
+    enabled: bool | None = None,
+    z: float | None = None,
+) -> str:
+    """Enable or disable a feeder and/or set its pick Z (strip feeders only: the reference and
+    last hole Z). Does not move the machine. Give at least one of enabled and z. The result shows
+    the values before and after."""
+    body = {"feederId": feeder_id, "enabled": enabled, "z": z, "reason": reason}
+    return json.dumps(_call("POST", "/feeder/update", body=body), ensure_ascii=False, indent=1)
 
 
 @mcp.tool()
