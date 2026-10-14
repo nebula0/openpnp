@@ -421,7 +421,8 @@ def scan_qr_feeders(
     confirm: bool = False,
     apply: bool = False,
     step: float = 8,
-    tape_offset: float = 15,
+    tape_offset: float = -14,
+    search_length: float = 80,
     tape_width: float = 8,
     z: float | None = None,
 ) -> str:
@@ -429,8 +430,11 @@ def scan_qr_feeders(
     to look at. Also runs without the AI: ai-bridge/scan_feeders.py.
 
     The top camera moves along y from x_from to x_to every step mm and reads the QR labels
-    (each names an OpenPnP part id, e.g. "C0603-1uF"), then photographs the strip tape_offset
-    mm beside each label (+y) and finds its sprocket holes and parts. With apply, a strip
+    (each names an OpenPnP part id, e.g. "C0603-1uF"). The labels are stuck on the strips, which
+    run on from under them: it photographs each strip from tape_offset mm beside its label (along
+    y, default below) and every 8 mm further, up to search_length mm, until parts show (used
+    pockets are empty), and finds the sprocket holes and parts. A strip that feeds towards its
+    label (turned round) is reported as an error. With apply, a strip
     feeder of that part near there is updated (Z and rotation in tape kept, feed count reset
     so that it picks the first part found), otherwise one is added, disabled, with Z and
     rotation in tape copied from a strip feeder of the same package (or z). Without apply
@@ -441,7 +445,7 @@ def scan_qr_feeders(
     ask the user, and only then call again with confirm=true. Afterwards the head is parked.
     """
     body = {"y": y, "xFrom": x_from, "xTo": x_to, "step": step, "tapeOffset": tape_offset,
-            "tapeWidth": tape_width, "z": z, "apply": apply, "confirm": confirm,
+            "searchLength": search_length, "tapeWidth": tape_width, "z": z, "apply": apply, "confirm": confirm,
             "reason": reason}
     return json.dumps(_call("POST", "/feeder/scan-qr", body=body, timeout=JOB_TIMEOUT_S),
                       ensure_ascii=False, indent=1)

@@ -2240,10 +2240,16 @@ public class AiBridgeServer {
      * the tape are kept, it continues with the first part found), otherwise a new one is added,
      * disabled until its Z has been checked. Without apply nothing is changed.
      *
-     * Body: {y (the row of label centers), xFrom, xTo, step (default 8), tapeOffset (from a
-     * label's center to the middle of the photo of its strip, along y, default 15), tapeWidth
-     * (default 8), z (the tape surface, for new feeders without a similar one; default the
-     * Z of a strip feeder of the same package), apply (default false), confirm}
+     * The labels are stuck on the strips, so the strip runs on from under its label: the first
+     * photo of the strip is tapeOffset beside the label center (along y, default -14, i.e.
+     * below), and while it shows no parts yet (used pockets), further photos follow every 8 mm
+     * up to searchLength (default 80) mm on. The feed has to run away from the label, a strip
+     * turned the other way round is reported.
+     *
+     * Body: {y (the row of label centers), xFrom, xTo, step (default 8), tapeOffset (default
+     * -14), searchLength (default 80), tapeWidth (default 8), z (the tape surface, for new
+     * feeders without a similar one; default the Z of a strip feeder of the same package),
+     * apply (default false), confirm}
      */
     private JsonObject scanQrFeeders(JsonObject body) throws Exception {
         Machine machine = Configuration.get()
@@ -2255,7 +2261,8 @@ public class AiBridgeServer {
         double xFrom = Math.min(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
         double xTo = Math.max(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
         double step = getDouble(body, "step", 8);
-        double tapeOffset = getDouble(body, "tapeOffset", 15);
+        double tapeOffset = getDouble(body, "tapeOffset", -14);
+        double searchLength = Math.min(200, Math.abs(getDouble(body, "searchLength", 80)));
         double tapeWidth = getDouble(body, "tapeWidth", 8);
         double givenZ = getDouble(body, "z", Double.NaN);
         boolean apply = getBoolean(body, "apply", false);
@@ -2270,8 +2277,9 @@ public class AiBridgeServer {
         int shots = (int) Math.floor((xTo - xFrom) / step + 1e-9) + 1;
         JsonObject gate = gateMotion(machine, body, "Move camera " + camera.getName()
                 + " at Safe Z along y " + round(rowY) + " from x " + round(xFrom) + " to "
-                + round(xTo) + " (" + shots + " photos) to read the QR labels, then to "
-                + round(tapeOffset) + " mm beside each label to photograph its strip. "
+                + round(xTo) + " (" + shots + " photos) to read the QR labels, then from "
+                + round(tapeOffset) + " mm beside each label along y, up to "
+                + round(searchLength) + " mm on, to photograph its strip until parts show. "
                 + (apply ? "Updates or adds a strip feeder per label (new ones disabled). "
                         : "Nothing is changed (apply is false). ")
                 + "No pick or place. Afterwards the head is parked.");
@@ -2350,10 +2358,6 @@ public class AiBridgeServer {
                     r.addProperty("error", "No part " + text + " in OpenPnP.");
                     continue;
                 }
-                MovableUtils.moveToLocationAtSafeZ(camera,
-                        camera.getLocation()
-                              .convertToUnits(LengthUnit.Millimeters)
-                              .derive(f[0], f[1] + tapeOffset, null, null));
                 ReferenceStripFeeder existing = null;
                 ReferenceStripFeeder similar = null;
                 for (Feeder feeder : machine.getFeeders()) {
@@ -2363,8 +2367,10 @@ public class AiBridgeServer {
                     ReferenceStripFeeder s = (ReferenceStripFeeder) feeder;
                     Location hole = s.getReferenceHoleLocation()
                                      .convertToUnits(LengthUnit.Millimeters);
-                    if (s.getPart() == part && Math.hypot(hole.getX() - f[0],
-                            hole.getY() - f[1] - tapeOffset) < 20) {
+                    // Anywhere along the strip, which runs on from the label.
+                    double along = (hole.getY() - f[1]) * Math.signum(tapeOffset);
+                    if (s.getPart() == part && Math.abs(hole.getX() - f[0]) < tapeWidth
+                            && along > -20 && along < searchLength + 20) {
                         existing = s;
                     }
                     if (s.getPart() != null && s.getPart()
@@ -2381,39 +2387,43 @@ public class AiBridgeServer {
                                                                    LengthUnit.Millimeters)
                                                            .getZ()
                                         : labelZ;
-                BufferedImage frame = camera.lightSettleAndCapture();
-                Location cameraLocation = camera.getLocation()
-                                                .convertToUnits(LengthUnit.Millimeters);
-                Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))
-                                     .convertToUnits(LengthUnit.Millimeters);
-                // Only the label's own strip: neighbors may show at the sides of the photo.
-                int halfWidth = (int) Math.round(tapeWidth * 0.9 / upp.getX());
-                int labelPx = (int) Math.round(frame.getWidth() / 2.0
-                        + (f[0] - cameraLocation.getX()) / upp.getX());
-                int x0 = Math.max(0, labelPx - halfWidth);
-                int x1 = Math.min(frame.getWidth(), labelPx + halfWidth);
-                double cx = frame.getWidth() / 2.0;
-                double cy = frame.getHeight() / 2.0;
-                StripTapeLocator.PixelToMachine toMachine =
-                        (px, py) -> new org.opencv.core.Point(
-                                cameraLocation.getX() + (px + x0 - cx) * upp.getX(),
-                                cameraLocation.getY() - (py - cy) * upp.getY());
-                Mat color = OpenCvUtils.toMat(frame);
-                Mat gray = new Mat();
-                StripTapeLocator.Result tape;
-                try {
-                    toGray(color, gray);
-                    Mat strip = gray.colRange(x0, x1);
-                    tape = StripTapeLocator.locate(strip, tapeWidth, upp.getX(), toMachine);
+                StripTapeLocator.Result tape = null;
+                String why = null;
+                double searched = 0;
+                double direction = Math.signum(tapeOffset);
+                for (double d = 0; d <= searchLength; d += 8) {
+                    MovableUtils.moveToLocationAtSafeZ(camera,
+                            camera.getLocation()
+                                  .convertToUnits(LengthUnit.Millimeters)
+                                  .derive(f[0], f[1] + tapeOffset + direction * d, null, null));
+                    searched = d;
+                    try {
+                        StripTapeLocator.Result t = locateStripNear(camera, f[0], z, tapeWidth);
+                        if (!t.parts.isEmpty()) {
+                            tape = t;
+                            break;
+                        }
+                        why = "holes but no parts (used pockets)";
+                    }
+                    catch (Exception e) {
+                        why = describe(e);
+                    }
                 }
-                catch (Exception e) {
+                if (tape == null) {
                     r.addProperty("status", "error");
-                    r.addProperty("error", "Strip not found next to the label: " + describe(e));
+                    r.addProperty("error", "No parts found on the strip within "
+                            + round(Math.abs(tapeOffset) + searched) + " mm of the label. Last "
+                            + "photo: " + why);
                     continue;
                 }
-                finally {
-                    color.release();
-                    gray.release();
+                if (tape.direction.y * direction < 0.5) {
+                    r.addProperty("status", "error");
+                    r.addProperty("error", "The strip feeds towards its label (direction "
+                            + round(Math.toDegrees(
+                                    Math.atan2(tape.direction.y, tape.direction.x)))
+                            + " degrees): turn it round, so that the parts are taken in order "
+                            + "away from the label.");
+                    continue;
                 }
                 r.addProperty("holesFound", tape.holes.size());
                 r.addProperty("partsFound", tape.parts.size());
@@ -2510,6 +2520,41 @@ public class AiBridgeServer {
             o.addProperty("applied", apply);
             return o;
         });
+    }
+
+    /**
+     * Photographs a strip where the camera is and finds its holes and parts, looking only within
+     * the tape's width around stripX, as neighbor strips may show at the sides. Runs on the
+     * machine thread.
+     */
+    private static StripTapeLocator.Result locateStripNear(Camera camera, double stripX,
+            double z, double tapeWidth) throws Exception {
+        BufferedImage frame = camera.lightSettleAndCapture();
+        Location cameraLocation = camera.getLocation()
+                                        .convertToUnits(LengthUnit.Millimeters);
+        Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))
+                             .convertToUnits(LengthUnit.Millimeters);
+        int halfWidth = (int) Math.round(tapeWidth * 0.9 / upp.getX());
+        int stripPx = (int) Math.round(
+                frame.getWidth() / 2.0 + (stripX - cameraLocation.getX()) / upp.getX());
+        int x0 = Math.max(0, stripPx - halfWidth);
+        int x1 = Math.min(frame.getWidth(), stripPx + halfWidth);
+        double cx = frame.getWidth() / 2.0;
+        double cy = frame.getHeight() / 2.0;
+        StripTapeLocator.PixelToMachine toMachine = (px, py) -> new org.opencv.core.Point(
+                cameraLocation.getX() + (px + x0 - cx) * upp.getX(),
+                cameraLocation.getY() - (py - cy) * upp.getY());
+        Mat color = OpenCvUtils.toMat(frame);
+        Mat gray = new Mat();
+        try {
+            toGray(color, gray);
+            return StripTapeLocator.locate(gray.colRange(x0, x1), tapeWidth, upp.getX(),
+                    toMachine);
+        }
+        finally {
+            color.release();
+            gray.release();
+        }
     }
 
     private static void toGray(Mat color, Mat gray) {

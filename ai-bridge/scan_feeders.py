@@ -37,8 +37,11 @@ def main():
     parser.add_argument('--from', dest='x_from', type=float, required=True)
     parser.add_argument('--to', dest='x_to', type=float, required=True)
     parser.add_argument('--step', type=float, default=8)
-    parser.add_argument('--tape-offset', type=float, default=15,
-                        help='mm from a label center to the middle of its strip, along y')
+    parser.add_argument('--tape-offset', type=float, default=-14,
+                        help='mm from a label center to the first photo of its strip, along y '
+                             '(negative: the strip runs on below the label)')
+    parser.add_argument('--search-length', type=float, default=80,
+                        help='how far along the strip to look for the first part')
     parser.add_argument('--z', type=float, help='tape surface Z for new feeders')
     parser.add_argument('--apply', action='store_true', help='update or add the feeders')
     parser.add_argument('--sim', action='store_true', help='use the simulation config')
@@ -46,7 +49,8 @@ def main():
     args = parser.parse_args()
     config_dir = os.path.expanduser('~/openpnp-sim' if args.sim else '~/.openpnp2')
     body = {'y': args.y, 'xFrom': args.x_from, 'xTo': args.x_to, 'step': args.step,
-            'tapeOffset': args.tape_offset, 'z': args.z, 'apply': args.apply,
+            'tapeOffset': args.tape_offset, 'searchLength': args.search_length, 'z': args.z,
+            'apply': args.apply,
             'reason': 'scan_feeders.py: set up strip feeders from their QR labels'}
 
     plan = call(config_dir, body)
