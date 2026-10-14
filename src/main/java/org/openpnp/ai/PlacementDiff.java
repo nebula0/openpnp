@@ -27,7 +27,6 @@ import org.opencv.core.CvType;
 import org.opencv.core.Mat;
 import org.opencv.core.MatOfDouble;
 import org.opencv.core.MatOfPoint;
-import org.opencv.core.MatOfPoint2f;
 import org.opencv.core.Point;
 import org.opencv.core.RotatedRect;
 import org.opencv.core.Scalar;
@@ -194,12 +193,9 @@ public class PlacementDiff {
             double other = Core.countNonZero(far);
             RotatedRect rect = null;
             if (changed >= MIN_CHANGED_FRACTION * length * width) {
-                MatOfPoint points = new MatOfPoint();
+                MatOfPoint points = track(temp, new MatOfPoint());
                 Core.findNonZero(part, points);
-                MatOfPoint2f points2f = new MatOfPoint2f(points.toArray());
-                rect = Imgproc.minAreaRect(points2f);
-                points.release();
-                points2f.release();
+                rect = principalRect(points.toArray());
             }
             return new Result(shift, changed, other, rect, mask);
         }
@@ -208,6 +204,55 @@ public class PlacementDiff {
                 t.release();
             }
         }
+    }
+
+    /**
+     * The rectangle along the principal axis of the points, spanning all but the outermost 2% of
+     * them on each side. Unlike the minimum area rectangle, a few stray pixels at a corner
+     * neither turn nor enlarge it.
+     */
+    static RotatedRect principalRect(Point[] points) {
+        double cx = 0;
+        double cy = 0;
+        for (Point p : points) {
+            cx += p.x;
+            cy += p.y;
+        }
+        cx /= points.length;
+        cy /= points.length;
+        double xx = 0;
+        double yy = 0;
+        double xy = 0;
+        for (Point p : points) {
+            xx += (p.x - cx) * (p.x - cx);
+            yy += (p.y - cy) * (p.y - cy);
+            xy += (p.x - cx) * (p.y - cy);
+        }
+        // Direction of the long axis in image coordinates, clockwise as seen.
+        double theta = 0.5 * Math.atan2(2 * xy, xx - yy);
+        double ux = Math.cos(theta);
+        double uy = Math.sin(theta);
+        double[] along = new double[points.length];
+        double[] across = new double[points.length];
+        for (int i = 0; i < points.length; i++) {
+            double dx = points[i].x - cx;
+            double dy = points[i].y - cy;
+            along[i] = dx * ux + dy * uy;
+            across[i] = -dx * uy + dy * ux;
+        }
+        java.util.Arrays.sort(along);
+        java.util.Arrays.sort(across);
+        int lo = (int) Math.floor(points.length * 0.02);
+        int hi = points.length - 1 - lo;
+        double a0 = along[lo];
+        double a1 = along[hi];
+        double c0 = across[lo];
+        double c1 = across[hi];
+        double ma = (a0 + a1) / 2;
+        double mc = (c0 + c1) / 2;
+        Point center = new Point(cx + ma * ux - mc * uy, cy + ma * uy + mc * ux);
+        return new RotatedRect(center, new Size(a1 - a0 + 1, c1 - c0 + 1),
+                Math.toDegrees(theta));
     }
 
     private static <T extends Mat> T track(List<Mat> temp, T m) {
