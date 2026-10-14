@@ -1569,26 +1569,32 @@ public class AiBridgeServer {
                         fiducialLocations, new JsonArray())) {
                     String key = photo.boardLocation.getUniqueId() + " " + photo.placement.getId();
                     File file = beforeFrameFile(job, photo.boardLocation, photo.placement);
-                    file.getParentFile()
-                        .mkdirs();
-                    ImageIO.write(photo.frame, "png", file);
-                    beforeFrames++;
                     BufferedImage bare = readReference(
                             bareFrameFile(job, photo.boardLocation, photo.placement), photo);
                     if (bare == null) {
                         noBarePhoto.add(new JsonPrimitive(key));
-                        continue;
                     }
-                    PlacementDiff.Result d = compare(bare, photo, new PartSize(photo));
-                    d.mask.release();
-                    if (d.isFound()) {
-                        // Something is there already: leave it to the user, do not place.
-                        job.storePlacedStatus(photo.boardLocation, photo.placement.getId(), true);
-                        skipped.add(key);
-                        double px = photo.upp.getX();
-                        occupied.add(new JsonPrimitive(key + " (changed " + round(
-                                d.changedArea * px * px) + " mm2 since the bare board photo)"));
+                    else {
+                        PlacementDiff.Result d = compare(bare, photo, new PartSize(photo));
+                        d.mask.release();
+                        if (d.isFound()) {
+                            // Something is there already: leave it to the user, do not place.
+                            // This photo is no "before" for a part placed later.
+                            job.storePlacedStatus(photo.boardLocation, photo.placement.getId(),
+                                    true);
+                            skipped.add(key);
+                            file.delete();
+                            double px = photo.upp.getX();
+                            occupied.add(new JsonPrimitive(key + " (changed "
+                                    + round(d.changedArea * px * px)
+                                    + " mm2 since the bare board photo)"));
+                            continue;
+                        }
                     }
+                    file.getParentFile()
+                        .mkdirs();
+                    ImageIO.write(photo.frame, "png", file);
+                    beforeFrames++;
                 }
             }
             JobProcessor processor = machine.getPnpJobProcessor();

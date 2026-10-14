@@ -171,8 +171,10 @@ public class PlacementDiff {
             Mat mask = new Mat();
             Imgproc.threshold(diff, diff, MIN_DIFFERENCE, 255, Imgproc.THRESH_BINARY);
             diff.convertTo(mask, CvType.CV_8U);
-            // Thin residues along strong edges remain where the alignment is not perfect.
-            int open = Math.max(3, (int) Math.round(width * 0.08)) | 1;
+            // Thin residues along strong edges remain where the alignment is not perfect, and
+            // the part casts a thin shadow next to it. Both are narrower than a fifth of the
+            // part, its ends and body are not.
+            int open = Math.min(31, Math.max(3, (int) Math.round(width * 0.2))) | 1;
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN,
                     Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, new Size(open, open)));
             // The border of the aligned image is made up.
