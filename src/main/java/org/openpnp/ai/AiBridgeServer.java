@@ -69,6 +69,8 @@ import org.openpnp.bedmap.BedMap;
 import org.openpnp.bedmap.BedMapScanner;
 import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
+import org.openpnp.machine.reference.ReferenceNozzle;
+import org.openpnp.machine.reference.ReferenceNozzleTip;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
 import org.openpnp.model.BoardLocation;
@@ -81,13 +83,16 @@ import org.openpnp.model.Location;
 import org.openpnp.model.Part;
 import org.openpnp.model.Placement;
 import org.openpnp.model.PlacementsHolderLocation;
+import org.openpnp.spi.Actuator;
 import org.openpnp.spi.Camera;
 import org.openpnp.spi.Feeder;
 import org.openpnp.spi.Head;
 import org.openpnp.spi.JobProcessor;
 import org.openpnp.spi.JobProcessor.JobProcessorException;
 import org.openpnp.spi.Machine;
+import org.openpnp.spi.MotionPlanner.CompletionType;
 import org.openpnp.spi.Nozzle;
+import org.openpnp.spi.NozzleTip;
 import org.openpnp.util.Cycles;
 import org.openpnp.util.MovableUtils;
 import org.openpnp.util.OpenCvUtils;
@@ -124,6 +129,10 @@ public class AiBridgeServer {
     public static final String TOKEN_HEADER = "X-AI-Bridge-Token";
 
     private static final long MACHINE_TASK_TIMEOUT_S = 180;
+    /** Longest way down a Z probe may go, mm. */
+    private static final double MAX_PROBE_RANGE_MM = 4;
+    /** Speed factor for the Z probe steps. */
+    private static final double PROBE_SPEED = 0.2;
     /**
      * Placing a few parts, with fiducials and vision, takes longer than other machine tasks.
      */
@@ -287,6 +296,8 @@ public class AiBridgeServer {
                     return setupStripFeeder(body);
                 case "/camera/move":
                     return moveCamera(body);
+                case "/feeder/probe-z":
+                    return probeFeederZ(body);
             }
         }
         return null;
@@ -712,6 +723,253 @@ public class AiBridgeServer {
         images.add(i);
         o.add("images", images);
         return o;
+    }
+
+    /**
+     * Finds the pick Z of a feeder by touching the next part with a nozzle: from above the
+     * expected Z it steps down with the vacuum on until the vacuum sensor shows that the nozzle
+     * tip is sealed on the part, never below floorZ. At contact the vacuum is turned off before
+     * lifting, so that the part stays in the tape. With apply, a strip feeder gets the measured Z.
+     *
+     * Body: {feederId, nozzleId (optional, default a nozzle with a fitting tip), startZ (default
+     * the feeder's Z + 1.5), floorZ (default the feeder's Z - 1), step (mm, default 0.05),
+     * settleMs (default 150), apply (default false), confirm}
+     */
+    private JsonObject probeFeederZ(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Feeder feeder = requireFeeder(machine, body);
+        Part part = feeder.getPart();
+        if (part == null) {
+            throw new BadRequest("Feeder " + feeder.getName() + " has no part set.");
+        }
+        ReferenceNozzle nozzle = probeNozzle(machine, body, part);
+        if (nozzle.getPart() != null) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " holds a part, discard it "
+                    + "first.");
+        }
+        ReferenceNozzleTip tip = (ReferenceNozzleTip) nozzle.getNozzleTip();
+        Location pick = nextPickLocation(feeder).convertToUnits(LengthUnit.Millimeters);
+        double expectedZ = pick.getZ();
+        double startZ = getDouble(body, "startZ", expectedZ + 1.5);
+        double floorZ = getDouble(body, "floorZ", expectedZ - 1);
+        double step = getDouble(body, "step", 0.05);
+        int settleMs = (int) getDouble(body, "settleMs", 150);
+        boolean apply = getBoolean(body, "apply", false);
+        if (step < 0.01 || step > 0.2) {
+            throw new BadRequest("step must be between 0.01 and 0.2 mm.");
+        }
+        if (startZ <= floorZ || startZ - floorZ > MAX_PROBE_RANGE_MM) {
+            throw new BadRequest("startZ must be above floorZ, by at most " + MAX_PROBE_RANGE_MM
+                    + " mm.");
+        }
+        if (settleMs < 0 || settleMs > 2000) {
+            throw new BadRequest("settleMs must be between 0 and 2000.");
+        }
+        if (apply && !(feeder instanceof ReferenceStripFeeder)) {
+            throw new BadRequest("apply is only supported for ReferenceStripFeeder so far.");
+        }
+
+        JsonObject gate = gateMotion(machine, body, "Move nozzle " + nozzle.getName() + " (tip "
+                + tip.getName() + ") over the next " + part.getId() + " of feeder "
+                + feeder.getName() + " at X " + round(pick.getX()) + ", Y " + round(pick.getY())
+                + ", down to Z " + round(startZ) + ", turn its vacuum on and step down by "
+                + round(step) + " mm until the vacuum shows contact, at most down to Z "
+                + round(floorZ) + " (the feeder's Z is now " + round(expectedZ) + "). At contact "
+                + "the vacuum is turned off before lifting, so the part stays in the tape. "
+                + (apply ? "Then the feeder's Z is set to the measured Z."
+                        : "The feeder is not changed."));
+        if (gate != null) {
+            return gate;
+        }
+
+        return runLogged("feeder/probe-z", body, machine, () -> {
+            Actuator valve = nozzle.getExpectedVacuumActuator();
+            JsonArray readings = new JsonArray();
+            Double contactZ = null;
+            double threshold;
+            MovableUtils.moveToLocationAtSafeZ(nozzle, pick.derive(null, null, startZ, null));
+            nozzle.getHead()
+                  .actuatePumpRequest(nozzle, true);
+            try {
+                valve.actuate(true);
+                nozzle.waitForCompletion(CompletionType.WaitForStillstand);
+                Thread.sleep(Math.max(settleMs, 300));
+                double baseline = nozzle.readVacuumLevel();
+                threshold = contactThreshold(tip, baseline);
+                readings.add(reading(startZ, baseline));
+                if (baseline <= threshold + 2) {
+                    throw new Exception("The vacuum level " + baseline + " with the tip in the "
+                            + "air is too close to the contact threshold " + threshold
+                            + " to tell contact. Is the tip blocked or already touching?");
+                }
+                int steps = (int) Math.floor((startZ - floorZ) / step + 1e-9);
+                for (int i = 1; i <= steps && contactZ == null; i++) {
+                    double z = startZ - i * step;
+                    nozzle.moveTo(pick.derive(null, null, z, null), PROBE_SPEED);
+                    nozzle.waitForCompletion(CompletionType.WaitForStillstand);
+                    Thread.sleep(settleMs);
+                    double level = nozzle.readVacuumLevel();
+                    readings.add(reading(z, level));
+                    if (level <= threshold) {
+                        // Read again, a single low reading may be noise.
+                        Thread.sleep(settleMs);
+                        level = nozzle.readVacuumLevel();
+                        readings.add(reading(z, level));
+                        if (level <= threshold) {
+                            contactZ = z;
+                        }
+                    }
+                }
+            }
+            finally {
+                // At contact the part may be held: let it go before lifting.
+                valve.actuate(false);
+                nozzle.getHead()
+                      .actuatePumpRequest(nozzle, false);
+                Thread.sleep(Math.max(settleMs, 300));
+            }
+            nozzle.moveToSafeZ();
+
+            JsonObject o;
+            if (contactZ == null) {
+                o = error("No contact down to Z " + round(floorZ) + ". The tip may have missed "
+                        + "the part, or the part is lower: check with the camera before probing "
+                        + "deeper.");
+            }
+            else {
+                o = ok();
+                o.addProperty("contactZ", round(contactZ));
+            }
+            o.addProperty("feederId", feeder.getId());
+            o.addProperty("feederName", feeder.getName());
+            o.addProperty("partId", part.getId());
+            o.addProperty("nozzleName", nozzle.getName());
+            o.addProperty("nozzleTip", tip.getName());
+            o.add("probeLocation", toJson(pick));
+            o.addProperty("feederZBefore", round(expectedZ));
+            o.addProperty("threshold", threshold);
+            o.add("readings", readings);
+
+            // Check that the part did not come up with the nozzle.
+            nozzle.getHead()
+                  .actuatePumpRequest(nozzle, true);
+            valve.actuate(true);
+            nozzle.waitForCompletion(CompletionType.WaitForStillstand);
+            Thread.sleep(Math.max(settleMs, 300));
+            double after = nozzle.readVacuumLevel();
+            o.addProperty("vacuumLevelAfterLift", after);
+            boolean stuck = after <= threshold;
+            o.addProperty("partStuckOnNozzle", stuck);
+            if (stuck) {
+                // Keep the vacuum on, so that it does not fall somewhere: discard it.
+                o.addProperty("warning", "A part seems to be on nozzle " + nozzle.getName()
+                        + " (vacuum kept on). Discard it with discard_part.");
+            }
+            else {
+                valve.actuate(false);
+                nozzle.getHead()
+                      .actuatePumpRequest(nozzle, false);
+            }
+
+            if (apply && contactZ != null) {
+                ReferenceStripFeeder strip = (ReferenceStripFeeder) feeder;
+                Location reference = strip.getReferenceHoleLocation()
+                                          .convertToUnits(LengthUnit.Millimeters);
+                Location last = strip.getLastHoleLocation()
+                                     .convertToUnits(LengthUnit.Millimeters);
+                strip.setReferenceHoleLocation(reference.derive(null, null, contactZ, null));
+                strip.setLastHoleLocation(last.derive(null, null, contactZ, null));
+                o.addProperty("applied", true);
+            }
+            else {
+                o.addProperty("applied", false);
+            }
+            return o;
+        });
+    }
+
+    /**
+     * The vacuum level at or below which the tip counts as sealed: between the tip's part on
+     * and part off ranges if they are set, otherwise a fixed drop from the level in the air.
+     */
+    private static double contactThreshold(ReferenceNozzleTip tip, double baseline) {
+        double onHigh = tip.getVacuumLevelPartOnHigh();
+        double offLow = tip.getVacuumLevelPartOffLow();
+        if (onHigh > 0 && offLow > onHigh) {
+            return (onHigh + offLow) / 2;
+        }
+        return baseline - 10;
+    }
+
+    private static JsonObject reading(double z, double level) {
+        JsonObject r = new JsonObject();
+        r.addProperty("z", round(z));
+        r.addProperty("level", level);
+        return r;
+    }
+
+    /**
+     * The nozzle given by nozzleId, or else the first one with a tip that fits the part.
+     */
+    private static ReferenceNozzle probeNozzle(Machine machine, JsonObject body, Part part)
+            throws BadRequest {
+        String nozzleId = getString(body, "nozzleId");
+        Nozzle nozzle = null;
+        if (nozzleId != null) {
+            nozzle = findNozzle(machine, nozzleId);
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle with id " + nozzleId);
+            }
+        }
+        else if (part.getPackage() != null) {
+            Set<NozzleTip> tips = part.getPackage()
+                                      .getCompatibleNozzleTips();
+            for (Head head : machine.getHeads()) {
+                for (Nozzle n : head.getNozzles()) {
+                    if (nozzle == null && n.getNozzleTip() != null
+                            && tips.contains(n.getNozzleTip())) {
+                        nozzle = n;
+                    }
+                }
+            }
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle has a tip that fits " + part.getId()
+                        + ", give nozzleId.");
+            }
+        }
+        else {
+            throw new BadRequest("Part " + part.getId() + " has no package, give nozzleId.");
+        }
+        if (!(nozzle instanceof ReferenceNozzle)
+                || !(nozzle.getNozzleTip() instanceof ReferenceNozzleTip)) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " has no tip loaded or does not "
+                    + "support vacuum sensing.");
+        }
+        return (ReferenceNozzle) nozzle;
+    }
+
+    /**
+     * Where the feeder's next part is, without feeding. For a strip feeder that is the part after
+     * the last one fed.
+     */
+    private static Location nextPickLocation(Feeder feeder) throws Exception {
+        if (feeder instanceof ReferenceStripFeeder) {
+            ReferenceStripFeeder strip = (ReferenceStripFeeder) feeder;
+            int feedCount = strip.getFeedCount();
+            if (feedCount == 0) {
+                // Before the first feed the pick location is already that of the first part.
+                return strip.getPickLocation();
+            }
+            strip.setFeedCount(feedCount + 1);
+            try {
+                return strip.getPickLocation();
+            }
+            finally {
+                strip.setFeedCount(feedCount);
+            }
+        }
+        return feeder.getPickLocation();
     }
 
     /**
@@ -2219,6 +2477,11 @@ public class AiBridgeServer {
     private static String getString(JsonObject body, String name) {
         JsonElement e = body.get(name);
         return e == null || e.isJsonNull() ? null : e.getAsString();
+    }
+
+    private static double getDouble(JsonObject body, String name, double defaultValue) {
+        JsonElement e = body.get(name);
+        return e == null || e.isJsonNull() ? defaultValue : e.getAsDouble();
     }
 
     private static boolean getBoolean(JsonObject body, String name, boolean defaultValue) {

@@ -28,7 +28,7 @@ VS Code 的 Java 擴充功能會把 class 編譯到同一個 `target/classes`，
 
 ## 操作規則（必須遵守）
 
-- **會讓機器移動的工具**（`inspect_feeder`、`pick_from_feeder`、`place_from_job`、`inspect_placements`、`move_camera`、`scan_bed_map`、`home_machine`、`discard_part`）：先不帶 `confirm` 呼叫，拿到 plan 後用一句話問使用者，使用者同意後才帶 `confirm=true` 再呼叫一次。每次都要問，前一次的同意不算數。
+- **會讓機器移動的工具**（`inspect_feeder`、`pick_from_feeder`、`place_from_job`、`inspect_placements`、`move_camera`、`probe_feeder_z`、`scan_bed_map`、`home_machine`、`discard_part`）：先不帶 `confirm` 呼叫，拿到 plan 後用一句話問使用者，使用者同意後才帶 `confirm=true` 再呼叫一次。每次都要問，前一次的同意不算數。
 - `scan_bed_map` 在背景執行：用 `get_bed_map_scan_status` 查進度，跑完後看 `status`、`nozzlesAfterFailure` 和 `safeZAfter`。要停就用 `cancel_bed_map_scan`。
 - `home_machine` 在真機上要特別提醒：歸零時整個噴頭都會移動，使用者可能不在機器旁邊，要請他確認路徑上沒有東西。
 - 用 `openpnp`（真機）之前先跑 `get_status`，確認連到的是哪台機器、`motionAllowed` 是否為 true。

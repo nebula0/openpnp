@@ -296,6 +296,38 @@ def move_camera(x: float, y: float, reason: str, confirm: bool = False) -> str:
 
 
 @mcp.tool()
+def probe_feeder_z(
+    feeder_id: str,
+    reason: str,
+    confirm: bool = False,
+    nozzle_id: str | None = None,
+    start_z: float | None = None,
+    floor_z: float | None = None,
+    step: float = 0.05,
+    settle_ms: int = 150,
+    apply: bool = False,
+) -> str:
+    """Measure a feeder's pick Z by touching its next part with a nozzle and the vacuum sensor.
+
+    The nozzle goes over the next part at Safe Z, down to start_z (default feeder Z + 1.5), turns
+    the vacuum on and steps down by step mm until the vacuum level drops below the contact
+    threshold (tip sealed on the part). It never goes below floor_z (default feeder Z - 1; at most
+    4 mm below start_z). At contact the vacuum is turned off before lifting so the part stays in
+    the tape. Choose floor_z conservatively: if the tip misses the part it goes all the way down.
+    nozzle_id defaults to the first nozzle with a tip that fits the part. With apply=true (strip
+    feeders only) the measured contactZ becomes the feeder's Z.
+
+    MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
+    call again with confirm=true. Check partStuckOnNozzle afterwards: if true, a part is on the
+    nozzle with the vacuum kept on, discard it. readings lists Z and vacuum level per step.
+    """
+    body = {"feederId": feeder_id, "confirm": confirm, "nozzleId": nozzle_id, "startZ": start_z,
+            "floorZ": floor_z, "step": step, "settleMs": settle_ms, "apply": apply,
+            "reason": reason}
+    return json.dumps(_call("POST", "/feeder/probe-z", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
 def setup_strip_feeder(
     part_id: str,
     z: float | None = None,
