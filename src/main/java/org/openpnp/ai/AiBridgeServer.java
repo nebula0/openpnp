@@ -1029,57 +1029,71 @@ public class AiBridgeServer {
                 bottomVision.preparePipeline(pipeline, settings.getPipelineParameterAssignments(),
                         camera, part.getPackage(), visionNozzle, visionNozzle.getNozzleTip(),
                         wanted, wanted, settings);
-                JsonArray thresholds = new JsonArray();
-                for (CvStage stage : pipeline.getStages()) {
-                    if (stage instanceof Threshold && stage.isEnabled()) {
-                        if (!Double.isNaN(thresholdValue)) {
-                            ((Threshold) stage).setThreshold((int) thresholdValue);
-                        }
-                        thresholds.add(new JsonPrimitive(((Threshold) stage).getThreshold()));
-                    }
-                }
-                o.add("thresholds", thresholds);
-                Location upp = camera.getUnitsPerPixelAtZ()
-                                     .convertToUnits(LengthUnit.Millimeters);
-                JsonArray shots = new JsonArray();
-                int shotIndex = 0;
-                for (CvPipeline.PipelineShot shot : pipeline.getPipelineShots()) {
-                    shot.apply();
-                    pipeline.process();
-                    JsonObject s = new JsonObject();
-                    CvStage.Result result = pipeline.getResult(VisionUtils.PIPELINE_RESULTS_NAME);
-                    Object model = result == null ? null : result.model;
-                    s.addProperty("found", model instanceof RotatedRect);
-                    if (model instanceof RotatedRect) {
-                        RotatedRect rect = (RotatedRect) model;
-                        Location offsets =
-                                VisionUtils.getPixelCenterOffsets(camera, rect.center.x,
-                                        rect.center.y)
-                                           .convertToUnits(LengthUnit.Millimeters);
-                        s.addProperty("offsetX", round(offsets.getX()));
-                        s.addProperty("offsetY", round(offsets.getY()));
-                        s.addProperty("angle", round(VisionUtils.getPixelAngle(camera,
-                                rect.angle)));
-                        s.addProperty("widthMm", round(rect.size.width * upp.getX()));
-                        s.addProperty("heightMm", round(rect.size.height * upp.getY()));
-                    }
-                    shots.add(s);
+                // The pipeline is the one of the settings, not a copy: undo the override, or
+                // OpenPnP would save it.
+                Map<Threshold, Integer> originals = new HashMap<>();
+                try {
+                    JsonArray thresholds = new JsonArray();
                     for (CvStage stage : pipeline.getStages()) {
-                        boolean source = stage instanceof ImageCapture;
-                        boolean threshold = stage instanceof Threshold;
-                        CvStage.Result r = pipeline.getResult(stage);
-                        if ((source || threshold) && stage.isEnabled() && r != null
-                                && r.image != null) {
-                            images.add(namedImage("shot" + shotIndex + "-" + stage.getName(),
-                                    OpenCvUtils.toBufferedImage(r.image)));
+                        if (stage instanceof Threshold && stage.isEnabled()) {
+                            if (!Double.isNaN(thresholdValue)) {
+                                originals.put((Threshold) stage,
+                                        ((Threshold) stage).getThreshold());
+                                ((Threshold) stage).setThreshold((int) thresholdValue);
+                            }
+                            thresholds.add(new JsonPrimitive(((Threshold) stage).getThreshold()));
                         }
                     }
-                    images.add(namedImage("shot" + shotIndex + "-final",
-                            OpenCvUtils.toBufferedImage(pipeline.getWorkingImage())));
-                    shotIndex++;
+                    o.add("thresholds", thresholds);
+                    Location upp = camera.getUnitsPerPixelAtZ()
+                                         .convertToUnits(LengthUnit.Millimeters);
+                    JsonArray shots = new JsonArray();
+                    int shotIndex = 0;
+                    for (CvPipeline.PipelineShot shot : pipeline.getPipelineShots()) {
+                        shot.apply();
+                        pipeline.process();
+                        JsonObject s = new JsonObject();
+                        CvStage.Result result =
+                                pipeline.getResult(VisionUtils.PIPELINE_RESULTS_NAME);
+                        Object model = result == null ? null : result.model;
+                        s.addProperty("found", model instanceof RotatedRect);
+                        if (model instanceof RotatedRect) {
+                            RotatedRect rect = (RotatedRect) model;
+                            Location offsets =
+                                    VisionUtils.getPixelCenterOffsets(camera, rect.center.x,
+                                            rect.center.y)
+                                               .convertToUnits(LengthUnit.Millimeters);
+                            s.addProperty("offsetX", round(offsets.getX()));
+                            s.addProperty("offsetY", round(offsets.getY()));
+                            s.addProperty("angle", round(VisionUtils.getPixelAngle(camera,
+                                    rect.angle)));
+                            s.addProperty("widthMm", round(rect.size.width * upp.getX()));
+                            s.addProperty("heightMm", round(rect.size.height * upp.getY()));
+                        }
+                        shots.add(s);
+                        for (CvStage stage : pipeline.getStages()) {
+                            boolean source = stage instanceof ImageCapture;
+                            boolean threshold = stage instanceof Threshold;
+                            CvStage.Result r = pipeline.getResult(stage);
+                            if ((source || threshold) && stage.isEnabled() && r != null
+                                    && r.image != null) {
+                                images.add(namedImage("shot" + shotIndex + "-" + stage.getName(),
+                                        OpenCvUtils.toBufferedImage(r.image)));
+                            }
+                        }
+                        images.add(namedImage("shot" + shotIndex + "-final",
+                                OpenCvUtils.toBufferedImage(pipeline.getWorkingImage())));
+                        shotIndex++;
+                    }
+                    o.add("shots", shots);
+                    o.addProperty("mmPerPixel", upp.getX());
                 }
-                o.add("shots", shots);
-                o.addProperty("mmPerPixel", upp.getX());
+                finally {
+                    for (Map.Entry<Threshold, Integer> e : originals.entrySet()) {
+                        e.getKey()
+                         .setThreshold(e.getValue());
+                    }
+                }
             }
             o.add("images", images);
             o.addProperty("legend", "Images per shot: the camera image, the Threshold stage "
