@@ -48,6 +48,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -313,6 +314,8 @@ public class AiBridgeServer {
                     return updateFeeder(body);
                 case "/vision/bottom/test":
                     return testBottomVision(body);
+                case "/job/survey":
+                    return surveyBareBoards(body);
             }
         }
         return null;
@@ -1556,16 +1559,36 @@ public class AiBridgeServer {
 
         JsonObject result = runLogged("job/place", body, machine, JOB_TIMEOUT_S, () -> {
             int beforeFrames = 0;
+            JsonArray occupied = new JsonArray();
+            JsonArray noBarePhoto = new JsonArray();
+            Set<String> skipped = new HashSet<>();
             if (captureBefore) {
                 Camera camera = machine.getDefaultHead()
                                        .getDefaultCamera();
                 for (PlacementPhoto photo : photographPlacements(machine, camera, selected,
                         fiducialLocations, new JsonArray())) {
+                    String key = photo.boardLocation.getUniqueId() + " " + photo.placement.getId();
                     File file = beforeFrameFile(job, photo.boardLocation, photo.placement);
                     file.getParentFile()
                         .mkdirs();
                     ImageIO.write(photo.frame, "png", file);
                     beforeFrames++;
+                    BufferedImage bare = readReference(
+                            bareFrameFile(job, photo.boardLocation, photo.placement), photo);
+                    if (bare == null) {
+                        noBarePhoto.add(new JsonPrimitive(key));
+                        continue;
+                    }
+                    PlacementDiff.Result d = compare(bare, photo, new PartSize(photo));
+                    d.mask.release();
+                    if (d.isFound()) {
+                        // Something is there already: leave it to the user, do not place.
+                        job.storePlacedStatus(photo.boardLocation, photo.placement.getId(), true);
+                        skipped.add(key);
+                        double px = photo.upp.getX();
+                        occupied.add(new JsonPrimitive(key + " (changed " + round(
+                                d.changedArea * px * px) + " mm2 since the bare board photo)"));
+                    }
                 }
             }
             JobProcessor processor = machine.getPnpJobProcessor();
@@ -1635,10 +1658,17 @@ public class AiBridgeServer {
                     p.addProperty("boardId", entry.getKey()
                                                   .getUniqueId());
                     p.addProperty("placementId", placement.getId());
-                    boolean done = job.retrievePlacedStatus(entry.getKey(), placement.getId());
+                    boolean skip = skipped.contains(entry.getKey()
+                                                        .getUniqueId()
+                            + " " + placement.getId());
+                    boolean done = !skip
+                            && job.retrievePlacedStatus(entry.getKey(), placement.getId());
                     p.addProperty("placed", done);
+                    if (skip) {
+                        p.addProperty("skipped", "A part seems to be there already.");
+                    }
                     placed.add(p);
-                    missing += done ? 0 : 1;
+                    missing += done || skip ? 0 : 1;
                 }
             }
             JsonObject o;
@@ -1651,6 +1681,13 @@ public class AiBridgeServer {
             }
             o.add("placements", placed);
             o.addProperty("beforePhotos", beforeFrames);
+            o.add("skippedOccupied", occupied);
+            if (noBarePhoto.size() > 0) {
+                o.add("notCheckedForParts", noBarePhoto);
+                o.addProperty("notCheckedNote", "No bare board photo (survey_bare_boards) for "
+                        + "these, so they were placed without checking for a part already "
+                        + "there.");
+            }
             o.add("feedersDisabled", gson.toJsonTree(disabledFeeders));
             o.add("partsRejected", gson.toJsonTree(rejectedParts));
             return o;
@@ -1775,8 +1812,10 @@ public class AiBridgeServer {
                 r.addProperty("partId", photo.placement.getPart()
                                                        .getId());
                 r.add("expectedLocation", toJson(photo.location));
-                File beforeFile = beforeFrameFile(job, photo.boardLocation, photo.placement);
-                Measured measured = measurePlacement(photo, beforeFile, tolerance, maxRotation, r);
+                Measured measured = measurePlacement(photo,
+                        beforeFrameFile(job, photo.boardLocation, photo.placement),
+                        bareFrameFile(job, photo.boardLocation, photo.placement), tolerance,
+                        maxRotation, r);
                 String verdict = getString(r, "verdict");
                 verdicts.merge(verdict, 1, Integer::sum);
                 r.addProperty("frameFile", frameFile == null ? null
@@ -1923,10 +1962,19 @@ public class AiBridgeServer {
      * "measured", "verdict" and "reasons" to r.
      */
     private static Measured measurePlacement(PlacementPhoto photo, File beforeFile,
-            double tolerance, double maxRotation, JsonObject r) throws IOException {
-        BufferedImage before = beforeFile.exists() ? ImageIO.read(beforeFile) : null;
-        if (before == null || before.getWidth() != photo.frame.getWidth()
-                || before.getHeight() != photo.frame.getHeight()) {
+            File bareFile, double tolerance, double maxRotation, JsonObject r)
+            throws IOException {
+        // A photo from before placing that is older than the bare board photo is from an
+        // earlier attempt, the board may have changed since.
+        BufferedImage before = bareFile.exists() && beforeFile.exists()
+                && beforeFile.lastModified() < bareFile.lastModified() ? null
+                        : readReference(beforeFile, photo);
+        boolean referenceIsBare = false;
+        if (before == null) {
+            before = readReference(bareFile, photo);
+            referenceIsBare = before != null;
+        }
+        if (before == null) {
             BodyLocator.Result body =
                     measureBody(photo.frame, photo.placement, photo.location, photo.upp, r);
             r.getAsJsonObject("measured")
@@ -1941,46 +1989,13 @@ public class AiBridgeServer {
 
         JsonObject m = new JsonObject();
         r.add("measured", m);
-        m.addProperty("method", "diff");
-        Package pkg = photo.placement.getPart()
-                                     .getPackage();
-        Footprint footprint = pkg == null ? null : pkg.getFootprint();
-        double mm = footprint == null ? 1
-                : new Length(1, footprint.getUnits()).convertToUnits(LengthUnit.Millimeters)
-                                                     .getValue();
-        boolean hasBody = footprint != null && footprint.getBodyWidth() > 0
-                && footprint.getBodyHeight() > 0;
-        // Without a body size, use the pads' extent.
-        Rectangle2D extent = footprint == null ? new Rectangle2D.Double(-0.5, -0.5, 1, 1)
-                : hasBody ? footprint.getBodyShape()
-                                     .getBounds2D()
-                        : footprint.getPadsShape()
-                                   .getBounds2D();
-        double length = Math.max(extent.getWidth(), extent.getHeight()) * mm;
-        double width = Math.min(extent.getWidth(), extent.getHeight()) * mm;
-        double expectedAxis =
-                photo.location.getRotation() + (extent.getWidth() >= extent.getHeight() ? 0 : 90);
+        m.addProperty("method", referenceIsBare ? "diff with bare board" : "diff");
+        PartSize size = new PartSize(photo);
+        double length = size.length;
+        double width = size.width;
+        double expectedAxis = size.axis;
         double px = photo.upp.getX();
-        Mat beforeMat = OpenCvUtils.toMat(before);
-        Mat afterMat = OpenCvUtils.toMat(photo.frame);
-        Mat beforeGray = new Mat();
-        Mat afterGray = new Mat();
-        PlacementDiff.Result d;
-        try {
-            toGray(beforeMat, beforeGray);
-            toGray(afterMat, afterGray);
-            org.opencv.core.Point center =
-                    new org.opencv.core.Point(photo.frame.getWidth() / 2.0,
-                            photo.frame.getHeight() / 2.0);
-            d = PlacementDiff.measure(beforeGray, afterGray, center, length / px, width / px,
-                    Math.max(PLACEMENT_SEARCH_MM, width) / px);
-        }
-        finally {
-            beforeMat.release();
-            afterMat.release();
-            beforeGray.release();
-            afterGray.release();
-        }
+        PlacementDiff.Result d = compare(before, photo, size);
         m.addProperty("cameraShiftX", round(d.shift.x * px));
         m.addProperty("cameraShiftY", round(-d.shift.y * photo.upp.getY()));
         m.addProperty("changedArea", round(d.changedArea * px * px));
@@ -2039,6 +2054,154 @@ public class AiBridgeServer {
         r.addProperty("verdict", verdict);
         r.add("reasons", reasons);
         return new Measured(d.rect, d.mask);
+    }
+
+    /**
+     * @return the photo in file if it exists and fits photo, else null.
+     */
+    private static BufferedImage readReference(File file, PlacementPhoto photo)
+            throws IOException {
+        BufferedImage image = file.exists() ? ImageIO.read(file) : null;
+        if (image == null || image.getWidth() != photo.frame.getWidth()
+                || image.getHeight() != photo.frame.getHeight()) {
+            return null;
+        }
+        return image;
+    }
+
+    /**
+     * The size of a placement's part in mm, from the footprint's body, or its pads if it has no
+     * body size, and the expected direction of its long side.
+     */
+    private static class PartSize {
+        final double length;
+        final double width;
+        final double axis;
+
+        PartSize(PlacementPhoto photo) {
+            Package pkg = photo.placement.getPart()
+                                         .getPackage();
+            Footprint footprint = pkg == null ? null : pkg.getFootprint();
+            double mm = footprint == null ? 1
+                    : new Length(1, footprint.getUnits()).convertToUnits(LengthUnit.Millimeters)
+                                                         .getValue();
+            boolean hasBody = footprint != null && footprint.getBodyWidth() > 0
+                    && footprint.getBodyHeight() > 0;
+            Rectangle2D extent = footprint == null ? new Rectangle2D.Double(-0.5, -0.5, 1, 1)
+                    : hasBody ? footprint.getBodyShape()
+                                         .getBounds2D()
+                            : footprint.getPadsShape()
+                                       .getBounds2D();
+            length = Math.max(extent.getWidth(), extent.getHeight()) * mm;
+            width = Math.min(extent.getWidth(), extent.getHeight()) * mm;
+            axis = photo.location.getRotation()
+                    + (extent.getWidth() >= extent.getHeight() ? 0 : 90);
+        }
+    }
+
+    /**
+     * Compares a placement photo with an earlier one of the same placement. The caller releases
+     * the result's mask.
+     */
+    private static PlacementDiff.Result compare(BufferedImage reference, PlacementPhoto photo,
+            PartSize size) {
+        double px = photo.upp.getX();
+        Mat referenceMat = OpenCvUtils.toMat(reference);
+        Mat photoMat = OpenCvUtils.toMat(photo.frame);
+        Mat referenceGray = new Mat();
+        Mat photoGray = new Mat();
+        try {
+            toGray(referenceMat, referenceGray);
+            toGray(photoMat, photoGray);
+            org.opencv.core.Point center =
+                    new org.opencv.core.Point(photo.frame.getWidth() / 2.0,
+                            photo.frame.getHeight() / 2.0);
+            return PlacementDiff.measure(referenceGray, photoGray, center, size.length / px,
+                    size.width / px, Math.max(PLACEMENT_SEARCH_MM, size.width) / px);
+        }
+        finally {
+            referenceMat.release();
+            photoMat.release();
+            referenceGray.release();
+            photoGray.release();
+        }
+    }
+
+    /**
+     * Where the photo of a placement on the bare board is kept, per job file, board and
+     * placement.
+     */
+    private File bareFrameFile(Job job, BoardLocation boardLocation, Placement placement) {
+        File before = beforeFrameFile(job, boardLocation, placement);
+        return new File(new File(bridgeDirectory, "inspect/bare"), before.getName());
+    }
+
+    /**
+     * Photographs placements of a job while the boards are still bare, so that place_from_job
+     * can tell whether a placement already has a part, and inspect_placements has something to
+     * compare with.
+     *
+     * Body: {file, placements (optional, default all part placements on enabled boards with the
+     * side up that the top camera sees), confirm}
+     */
+    private JsonObject surveyBareBoards(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Job job = loadJob(getString(body, "file"));
+        Map<BoardLocation, List<Placement>> selected;
+        if (body.has("placements") && !body.get("placements")
+                                            .isJsonNull()) {
+            selected = selectPlacements(job, body, false, new ArrayList<>());
+        }
+        else {
+            selected = new LinkedHashMap<>();
+            for (BoardLocation boardLocation : job.getBoardLocations()) {
+                if (!boardLocation.isEnabled()) {
+                    continue;
+                }
+                for (Placement placement : boardLocation.getBoard()
+                                                        .getPlacements()) {
+                    if (placement.getType() == Placement.Type.Placement
+                            && placement.getPart() != null
+                            && placement.getSide() == boardLocation.getGlobalSide()) {
+                        selected.computeIfAbsent(boardLocation, k -> new ArrayList<>())
+                                .add(placement);
+                    }
+                }
+            }
+        }
+        int count = 0;
+        for (List<Placement> list : selected.values()) {
+            count += list.size();
+        }
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        Set<PlacementsHolderLocation<?>> fiducialLocations = fiducialLocations(selected);
+        JsonObject gate = gateMotion(machine, body, "Move camera " + camera.getName()
+                + " at Safe Z over the fiducials of " + fiducialLocations.size()
+                + " board(s)/panel(s), then over " + count + " placement(s) on "
+                + selected.size() + " board(s) and photograph each as the bare board, no pick "
+                + "or place. The boards must have no parts on these placements yet.");
+        if (gate != null) {
+            return gate;
+        }
+        return runLogged("job/survey", body, machine, JOB_TIMEOUT_S, () -> {
+            JsonArray fiducialsChecked = new JsonArray();
+            List<PlacementPhoto> photos = photographPlacements(machine, camera, selected,
+                    fiducialLocations, fiducialsChecked);
+            Map<String, Integer> perBoard = new LinkedHashMap<>();
+            for (PlacementPhoto photo : photos) {
+                File file = bareFrameFile(job, photo.boardLocation, photo.placement);
+                file.getParentFile()
+                    .mkdirs();
+                ImageIO.write(photo.frame, "png", file);
+                perBoard.merge(photo.boardLocation.getUniqueId(), 1, Integer::sum);
+            }
+            JsonObject o = ok();
+            o.add("fiducialsChecked", fiducialsChecked);
+            o.add("photographed", gson.toJsonTree(perBoard));
+            return o;
+        });
     }
 
     private static void toGray(Mat color, Mat gray) {

@@ -240,11 +240,37 @@ def place_from_job(
     (default 5) fail in a row; partsRejected lists why. On failure the job processor discards
     what was picked, and nozzlesAfterFailure shows what is left.
     With capture_before (default) the top camera first photographs each placement, so that
-    inspect_placements can find the part by what changed (beforePhotos counts them).
+    inspect_placements can find the part by what changed (beforePhotos counts them). If there
+    is a bare board photo (survey_bare_boards) and the placement changed since then, a part
+    seems to be there already: it is not placed (skippedOccupied, "skipped" on the placement).
+    notCheckedForParts lists placements without a bare board photo, placed unchecked.
     """
     body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason,
             "maxPartFailures": max_part_failures, "captureBefore": capture_before}
     return json.dumps(_call("POST", "/job/place", body=body, timeout=JOB_TIMEOUT_S),
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def survey_bare_boards(
+    job_file: str,
+    reason: str,
+    confirm: bool = False,
+    placements: list[dict] | None = None,
+) -> str:
+    """Photograph the placements of a job while the boards are still bare (no parts on them).
+
+    Run this once after loading new boards. place_from_job then compares each placement with
+    its bare photo and does not place where a part seems to be already, and inspect_placements
+    can compare with it when there is no photo from just before placing. placements: as for
+    place_from_job; default all part placements on enabled boards. Takes about a second per
+    placement. Returns how many were photographed per board, no images.
+
+    MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
+    to get the plan, ask the user, and only then call again with confirm=true.
+    """
+    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
+    return json.dumps(_call("POST", "/job/survey", body=body, timeout=JOB_TIMEOUT_S),
                       ensure_ascii=False, indent=1)
 
 
