@@ -413,6 +413,41 @@ def update_feeder(
 
 
 @mcp.tool()
+def scan_qr_feeders(
+    y: float,
+    x_from: float,
+    x_to: float,
+    reason: str,
+    confirm: bool = False,
+    apply: bool = False,
+    step: float = 8,
+    tape_offset: float = 15,
+    tape_width: float = 8,
+    z: float | None = None,
+) -> str:
+    """Set up strip feeders from QR labels at the start of each cut tape strip, without photos
+    to look at. Also runs without the AI: ai-bridge/scan_feeders.py.
+
+    The top camera moves along y from x_from to x_to every step mm and reads the QR labels
+    (each names an OpenPnP part id, e.g. "C0603-1uF"), then photographs the strip tape_offset
+    mm beside each label (+y) and finds its sprocket holes and parts. With apply, a strip
+    feeder of that part near there is updated (Z and rotation in tape kept, feed count reset
+    so that it picks the first part found), otherwise one is added, disabled, with Z and
+    rotation in tape copied from a strip feeder of the same package (or z). Without apply
+    nothing changes: labels shows what would happen ("would add"/"would update"), with
+    firstPick. Labels with an unknown part or no strip found get status "error".
+
+    MOVES THE MACHINE (camera only, at Safe Z): first call without confirm to get the plan,
+    ask the user, and only then call again with confirm=true. Afterwards the head is parked.
+    """
+    body = {"y": y, "xFrom": x_from, "xTo": x_to, "step": step, "tapeOffset": tape_offset,
+            "tapeWidth": tape_width, "z": z, "apply": apply, "confirm": confirm,
+            "reason": reason}
+    return json.dumps(_call("POST", "/feeder/scan-qr", body=body, timeout=JOB_TIMEOUT_S),
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
 def setup_strip_feeder(
     part_id: str,
     z: float | None = None,

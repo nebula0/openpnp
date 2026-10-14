@@ -319,6 +319,8 @@ public class AiBridgeServer {
                     return testBottomVision(body);
                 case "/job/survey":
                     return surveyBareBoards(body);
+                case "/feeder/scan-qr":
+                    return scanQrFeeders(body);
             }
         }
         return null;
@@ -2226,6 +2228,286 @@ public class AiBridgeServer {
             JsonObject o = ok();
             o.add("fiducialsChecked", fiducialsChecked);
             o.add("photographed", gson.toJsonTree(perBoard));
+            return o;
+        });
+    }
+
+    /**
+     * Sets up strip feeders from QR labels, without anyone looking at photos: the top camera
+     * moves along a row of labels, one at the start of each cut tape strip, reads which part
+     * each strip holds, then photographs the strip next to its label and finds its sprocket
+     * holes and parts. A strip feeder of that part near there is updated (its Z and rotation in
+     * the tape are kept, it continues with the first part found), otherwise a new one is added,
+     * disabled until its Z has been checked. Without apply nothing is changed.
+     *
+     * Body: {y (the row of label centers), xFrom, xTo, step (default 8), tapeOffset (from a
+     * label's center to the middle of the photo of its strip, along y, default 15), tapeWidth
+     * (default 8), z (the tape surface, for new feeders without a similar one; default the
+     * Z of a strip feeder of the same package), apply (default false), confirm}
+     */
+    private JsonObject scanQrFeeders(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        if (!body.has("y") || !body.has("xFrom") || !body.has("xTo")) {
+            throw new BadRequest("Give y, xFrom and xTo of the row of labels.");
+        }
+        double rowY = getDouble(body, "y", 0);
+        double xFrom = Math.min(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
+        double xTo = Math.max(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
+        double step = getDouble(body, "step", 8);
+        double tapeOffset = getDouble(body, "tapeOffset", 15);
+        double tapeWidth = getDouble(body, "tapeWidth", 8);
+        double givenZ = getDouble(body, "z", Double.NaN);
+        boolean apply = getBoolean(body, "apply", false);
+        if (step < 2 || step > 15) {
+            throw new BadRequest("step must be between 2 and 15 mm.");
+        }
+        if (xTo - xFrom > 500) {
+            throw new BadRequest("The row may be at most 500 mm long.");
+        }
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        int shots = (int) Math.floor((xTo - xFrom) / step + 1e-9) + 1;
+        JsonObject gate = gateMotion(machine, body, "Move camera " + camera.getName()
+                + " at Safe Z along y " + round(rowY) + " from x " + round(xFrom) + " to "
+                + round(xTo) + " (" + shots + " photos) to read the QR labels, then to "
+                + round(tapeOffset) + " mm beside each label to photograph its strip. "
+                + (apply ? "Updates or adds a strip feeder per label (new ones disabled). "
+                        : "Nothing is changed (apply is false). ")
+                + "No pick or place. Afterwards the head is parked.");
+        if (gate != null) {
+            return gate;
+        }
+
+        return runLogged("feeder/scan-qr", body, machine, JOB_TIMEOUT_S, () -> {
+            // 1. Read the labels along the row.
+            List<double[]> found = new ArrayList<>();
+            List<String> texts = new ArrayList<>();
+            double labelZ = Double.isNaN(givenZ) ? camera.getDefaultZ()
+                                                         .convertToUnits(LengthUnit.Millimeters)
+                                                         .getValue()
+                    : givenZ;
+            for (int i = 0; i < shots; i++) {
+                double x = xFrom + i * step;
+                MovableUtils.moveToLocationAtSafeZ(camera,
+                        camera.getLocation()
+                              .convertToUnits(LengthUnit.Millimeters)
+                              .derive(x, rowY, null, null));
+                BufferedImage frame = camera.lightSettleAndCapture();
+                Location upp = camera.getUnitsPerPixel(new Length(labelZ, LengthUnit.Millimeters))
+                                     .convertToUnits(LengthUnit.Millimeters);
+                Mat color = OpenCvUtils.toMat(frame);
+                Mat gray = new Mat();
+                try {
+                    toGray(color, gray);
+                    for (QrLabelLocator.Label l : QrLabelLocator.find(gray)) {
+                        double dx = l.center.x - frame.getWidth() / 2.0;
+                        double dy = l.center.y - frame.getHeight() / 2.0;
+                        double lx = x + dx * upp.getX();
+                        double ly = rowY - dy * upp.getY();
+                        // Seen in several photos: keep the one nearest the photo's center.
+                        int same = -1;
+                        for (int k = 0; k < found.size(); k++) {
+                            if (texts.get(k)
+                                     .equals(l.text)
+                                    && Math.hypot(found.get(k)[0] - lx,
+                                            found.get(k)[1] - ly) < 4) {
+                                same = k;
+                            }
+                        }
+                        double[] entry = new double[] {lx, ly, l.angle, Math.hypot(dx, dy)};
+                        if (same < 0) {
+                            found.add(entry);
+                            texts.add(l.text);
+                        }
+                        else if (entry[3] < found.get(same)[3]) {
+                            found.set(same, entry);
+                        }
+                    }
+                }
+                finally {
+                    color.release();
+                    gray.release();
+                }
+            }
+
+            // 2. Find each label's strip and its feeder.
+            JsonArray labels = new JsonArray();
+            int changed = 0;
+            for (int k = 0; k < found.size(); k++) {
+                double[] f = found.get(k);
+                String text = texts.get(k);
+                JsonObject r = new JsonObject();
+                r.addProperty("text", text);
+                r.addProperty("x", round(f[0]));
+                r.addProperty("y", round(f[1]));
+                r.addProperty("angle", round(f[2]));
+                labels.add(r);
+                Part part = Configuration.get()
+                                         .getPart(text);
+                if (part == null) {
+                    r.addProperty("status", "error");
+                    r.addProperty("error", "No part " + text + " in OpenPnP.");
+                    continue;
+                }
+                MovableUtils.moveToLocationAtSafeZ(camera,
+                        camera.getLocation()
+                              .convertToUnits(LengthUnit.Millimeters)
+                              .derive(f[0], f[1] + tapeOffset, null, null));
+                ReferenceStripFeeder existing = null;
+                ReferenceStripFeeder similar = null;
+                for (Feeder feeder : machine.getFeeders()) {
+                    if (!(feeder instanceof ReferenceStripFeeder)) {
+                        continue;
+                    }
+                    ReferenceStripFeeder s = (ReferenceStripFeeder) feeder;
+                    Location hole = s.getReferenceHoleLocation()
+                                     .convertToUnits(LengthUnit.Millimeters);
+                    if (s.getPart() == part && Math.hypot(hole.getX() - f[0],
+                            hole.getY() - f[1] - tapeOffset) < 20) {
+                        existing = s;
+                    }
+                    if (s.getPart() != null && s.getPart()
+                                                .getPackage() == part.getPackage()) {
+                        similar = s;
+                    }
+                }
+                double z = existing != null ? existing.getReferenceHoleLocation()
+                                                      .convertToUnits(LengthUnit.Millimeters)
+                                                      .getZ()
+                        : !Double.isNaN(givenZ) ? givenZ
+                                : similar != null ? similar.getReferenceHoleLocation()
+                                                           .convertToUnits(
+                                                                   LengthUnit.Millimeters)
+                                                           .getZ()
+                                        : labelZ;
+                BufferedImage frame = camera.lightSettleAndCapture();
+                Location cameraLocation = camera.getLocation()
+                                                .convertToUnits(LengthUnit.Millimeters);
+                Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))
+                                     .convertToUnits(LengthUnit.Millimeters);
+                // Only the label's own strip: neighbors may show at the sides of the photo.
+                int halfWidth = (int) Math.round(tapeWidth * 0.9 / upp.getX());
+                int labelPx = (int) Math.round(frame.getWidth() / 2.0
+                        + (f[0] - cameraLocation.getX()) / upp.getX());
+                int x0 = Math.max(0, labelPx - halfWidth);
+                int x1 = Math.min(frame.getWidth(), labelPx + halfWidth);
+                double cx = frame.getWidth() / 2.0;
+                double cy = frame.getHeight() / 2.0;
+                StripTapeLocator.PixelToMachine toMachine =
+                        (px, py) -> new org.opencv.core.Point(
+                                cameraLocation.getX() + (px + x0 - cx) * upp.getX(),
+                                cameraLocation.getY() - (py - cy) * upp.getY());
+                Mat color = OpenCvUtils.toMat(frame);
+                Mat gray = new Mat();
+                StripTapeLocator.Result tape;
+                try {
+                    toGray(color, gray);
+                    Mat strip = gray.colRange(x0, x1);
+                    tape = StripTapeLocator.locate(strip, tapeWidth, upp.getX(), toMachine);
+                }
+                catch (Exception e) {
+                    r.addProperty("status", "error");
+                    r.addProperty("error", "Strip not found next to the label: " + describe(e));
+                    continue;
+                }
+                finally {
+                    color.release();
+                    gray.release();
+                }
+                r.addProperty("holesFound", tape.holes.size());
+                r.addProperty("partsFound", tape.parts.size());
+                r.addProperty("partPitch", tape.partPitch);
+                r.addProperty("feedDirectionDegrees",
+                        round(Math.toDegrees(Math.atan2(tape.direction.y, tape.direction.x))));
+                r.addProperty("z", round(z));
+
+                ReferenceStripFeeder feeder = existing != null ? existing
+                        : new ReferenceStripFeeder();
+                Location oldReference = existing == null ? null
+                        : existing.getReferenceHoleLocation()
+                                  .convertToUnits(LengthUnit.Millimeters);
+                Location oldLast = existing == null ? null
+                        : existing.getLastHoleLocation()
+                                  .convertToUnits(LengthUnit.Millimeters);
+                int oldCount = existing == null ? 0 : existing.getFeedCount();
+                Location newReference = new Location(LengthUnit.Millimeters,
+                        tape.referenceHole.x, tape.referenceHole.y, z, 0);
+                Location newLast = new Location(LengthUnit.Millimeters, tape.lastHole.x,
+                        tape.lastHole.y, z, 0);
+                double rotationInTape = existing != null ? existing.getLocation()
+                                                                   .getRotation()
+                        : similar != null ? similar.getLocation()
+                                                   .getRotation()
+                                : 0;
+                // Work out the first pick with the new holes, also for a dry run.
+                feeder.setReferenceHoleLocation(newReference);
+                feeder.setLastHoleLocation(newLast);
+                feeder.setFeedCount(1);
+                Location firstPick = existing != null ? feeder.getPickLocation()
+                        : null;
+                if (existing == null) {
+                    feeder.setPart(part);
+                    feeder.setTapeWidth(new Length(tapeWidth, LengthUnit.Millimeters));
+                    feeder.setPartPitch(new Length(tape.partPitch, LengthUnit.Millimeters));
+                    feeder.setLocation(
+                            new Location(LengthUnit.Millimeters, 0, 0, 0, rotationInTape));
+                    firstPick = feeder.getPickLocation();
+                }
+                r.add("firstPick", toJson(firstPick.convertToUnits(LengthUnit.Millimeters)));
+                r.addProperty("rotationInTape", rotationInTape);
+                if (existing == null && similar == null) {
+                    r.addProperty("warning", "No strip feeder of package "
+                            + (part.getPackage() == null ? "?"
+                                    : part.getPackage()
+                                          .getId())
+                            + " to copy the rotation in the tape and Z from: check them.");
+                }
+                if (!apply) {
+                    // Leave everything as it was.
+                    if (existing != null) {
+                        existing.setReferenceHoleLocation(oldReference);
+                        existing.setLastHoleLocation(oldLast);
+                        existing.setFeedCount(oldCount);
+                    }
+                    r.addProperty("status", existing != null ? "would update" : "would add");
+                    if (existing != null) {
+                        r.addProperty("feederName", existing.getName());
+                    }
+                    continue;
+                }
+                feeder.setFeedCount(0);
+                if (existing == null) {
+                    feeder.setName(part.getId() + " strip");
+                    feeder.setEnabled(false);
+                    onSwing(() -> {
+                        machine.addFeeder(feeder);
+                        return null;
+                    });
+                    r.addProperty("status", "added");
+                }
+                else {
+                    r.addProperty("status", "updated");
+                    r.addProperty("referenceHoleBefore", oldReference.toString());
+                }
+                r.addProperty("feederId", feeder.getId());
+                r.addProperty("feederName", feeder.getName());
+                r.addProperty("enabled", feeder.isEnabled());
+                changed++;
+            }
+            if (changed > 0) {
+                onSwing(() -> {
+                    MainFrame.get()
+                             .getFeedersTab()
+                             .updateView();
+                    return null;
+                });
+            }
+            MovableUtils.park(camera.getHead());
+            JsonObject o = ok();
+            o.addProperty("labelsFound", found.size());
+            o.add("labels", labels);
+            o.addProperty("applied", apply);
             return o;
         });
     }
