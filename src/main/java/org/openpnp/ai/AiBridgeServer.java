@@ -152,7 +152,10 @@ public class AiBridgeServer {
      * Inspection: how far a part may be off and turned, and how far to look for it.
      */
     private static final double DEFAULT_PLACEMENT_TOLERANCE_MM = 0.25;
-    private static final double DEFAULT_MAX_ROTATION_ERROR = 5;
+    /**
+     * 0: rotation is only judged by how far it moves the ends of the part.
+     */
+    private static final double DEFAULT_MAX_ROTATION_ERROR = 0;
     private static final double PLACEMENT_SEARCH_MM = 1;
     private static final int MAX_IMAGE_DIMENSION = 800;
     private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
@@ -1796,6 +1799,7 @@ public class AiBridgeServer {
                     .append("; ");
             }
         }
+        plan.append("Afterwards the head is parked.");
         JsonObject gate = gateMotion(machine, body, plan.toString());
         if (gate != null) {
             return gate;
@@ -1805,6 +1809,8 @@ public class AiBridgeServer {
             JsonArray fiducialsChecked = new JsonArray();
             List<PlacementPhoto> photos = photographPlacements(machine, camera, selected,
                     fiducialLocations, fiducialsChecked);
+            // Do not leave the head over the boards, see surveyBareBoards.
+            MovableUtils.park(camera.getHead());
             JsonArray results = new JsonArray();
             JsonArray imageArray = new JsonArray();
             Map<String, Integer> verdicts = new LinkedHashMap<>();
@@ -2033,10 +2039,19 @@ public class AiBridgeServer {
                 reasons.add(new JsonPrimitive("Offset " + round(offset)
                         + " mm is over the tolerance of " + round(tolerance) + " mm."));
             }
-            // A square part has no long side to tell its rotation from.
-            if (length > width * 1.2 && Math.abs(rotationError) > maxRotation) {
+            // A square part has no long side to tell its rotation from. Turning moves the ends
+            // of the part off their pads, like an offset: a small part may turn more than a long
+            // one. maxRotation, if given, also limits the angle itself.
+            double endShift = length / 2 * Math.abs(Math.sin(Math.toRadians(rotationError)));
+            m.addProperty("endShiftByRotation", round(endShift));
+            if (length > width * 1.2 && (endShift > tolerance
+                    || (maxRotation > 0 && Math.abs(rotationError) > maxRotation))) {
                 reasons.add(new JsonPrimitive("Rotation error " + round(rotationError)
-                        + " degrees is over " + round(maxRotation) + "."));
+                        + " degrees moves the ends of the part by " + round(endShift)
+                        + " mm (tolerance " + round(tolerance) + " mm"
+                        + (maxRotation > 0 ? ", or at most " + round(maxRotation) + " degrees"
+                                : "")
+                        + ")."));
             }
             double lengthRatio = d.length * px / length;
             double widthRatio = d.width * px / width;
@@ -2187,7 +2202,8 @@ public class AiBridgeServer {
                 + " at Safe Z over the fiducials of " + fiducialLocations.size()
                 + " board(s)/panel(s), then over " + count + " placement(s) on "
                 + selected.size() + " board(s) and photograph each as the bare board, no pick "
-                + "or place. The boards must have no parts on these placements yet.");
+                + "or place. The boards must have no parts on these placements yet. Afterwards "
+                + "the head is parked.");
         if (gate != null) {
             return gate;
         }
@@ -2195,6 +2211,10 @@ public class AiBridgeServer {
             JsonArray fiducialsChecked = new JsonArray();
             List<PlacementPhoto> photos = photographPlacements(machine, camera, selected,
                     fiducialLocations, fiducialsChecked);
+            // Parts were knocked over twice after OpenPnP was restarted with the head left over
+            // the boards, maybe a nozzle sinks when the motors are off, or homing moves X/Y
+            // first. Park it out of the way.
+            MovableUtils.park(camera.getHead());
             Map<String, Integer> perBoard = new LinkedHashMap<>();
             for (PlacementPhoto photo : photos) {
                 File file = bareFrameFile(job, photo.boardLocation, photo.placement);

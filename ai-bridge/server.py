@@ -264,7 +264,8 @@ def survey_bare_boards(
     its bare photo and does not place where a part seems to be already, and inspect_placements
     can compare with it when there is no photo from just before placing. placements: as for
     place_from_job; default all part placements on enabled boards. Takes about a second per
-    placement. Returns how many were photographed per board, no images.
+    placement. Returns how many were photographed per board, no images. Afterwards the head is
+    parked, away from the boards.
 
     MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
     to get the plan, ask the user, and only then call again with confirm=true.
@@ -282,7 +283,7 @@ def inspect_placements(
     confirm: bool = False,
     images: str = "failures",
     tolerance_mm: float = 0.25,
-    max_rotation_degrees: float = 5,
+    max_rotation_degrees: float = 0,
 ) -> list:
     """Check placed parts: the top camera moves over each placement of a job file, takes a
     photo and judges it, so that photos need to be looked at only for parts that failed or
@@ -290,7 +291,8 @@ def inspect_placements(
 
     If place_from_job took a photo before placing (its default), the part is found by what
     changed since then, whatever its color, and each placement gets a verdict: "ok", "check"
-    (reasons: offset over tolerance_mm, rotation over max_rotation_degrees, size of the change
+    (reasons: offset over tolerance_mm, rotation moving the part's ends by more than
+    tolerance_mm, or over max_rotation_degrees if that is set (default 0: off), size of the change
     not matching the part, or something else in the photo changed, e.g. a pushed neighbor) or
     "missing" (nothing changed). Without a photo from before, the verdict is "unverified": a
     dark body search only suits IC bodies, judge from the image. measured.offsetX/offsetY is
@@ -302,6 +304,7 @@ def inspect_placements(
     image center yellow cross), the part found in magenta and what changed tinted red.
 
     placements: [{"boardId": "Pnl1⇒Brd1", "placementId": "U1"}, ...] as for place_from_job.
+    Afterwards the head is parked, away from the boards.
     MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
     to get the plan, ask the user, and only then call again with confirm=true.
     """
