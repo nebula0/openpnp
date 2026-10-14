@@ -132,6 +132,19 @@ public class StripTapeLocatorTest {
     }
 
     @Test
+    public void findsHoleJoinedToDarkGround() throws Exception {
+        // A strip cut close to its holes: dark necks join two of the three holes to the ground,
+        // which leaves one hole without opening.
+        Mat image = tape(new Point(4, -2), new Point(0, -1), 3, 2, 1);
+        Imgproc.line(image, toPixel(4, -2), toPixel(1.5, -2), new Scalar(20), 30);
+        Imgproc.line(image, toPixel(4, -6), toPixel(1.5, -6), new Scalar(20), 30);
+        StripTapeLocator.Result r =
+                StripTapeLocator.locate(image, 8, MM_PER_PIXEL, StripTapeLocatorTest::toMachine);
+        assertEquals(3, r.holes.size());
+        assertFeederPicksParts(r);
+    }
+
+    @Test
     public void needsHoles() {
         Mat image = new Mat(1100, 1900, CvType.CV_8UC1, new Scalar(250));
         assertThrows(Exception.class, () -> StripTapeLocator.locate(image, 8, MM_PER_PIXEL,

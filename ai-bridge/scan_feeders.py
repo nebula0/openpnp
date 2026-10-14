@@ -36,7 +36,9 @@ def main():
     parser.add_argument('--y', type=float, required=True, help='y of the row of label centers')
     parser.add_argument('--from', dest='x_from', type=float, required=True)
     parser.add_argument('--to', dest='x_to', type=float, required=True)
-    parser.add_argument('--step', type=float, default=8)
+    parser.add_argument('--step', type=float, default=10)
+    parser.add_argument('--y-tolerance', type=float, default=4,
+                        help='labels may be this far off --y (three rows of photos; 0: one row)')
     parser.add_argument('--tape-offset', type=float, default=-14,
                         help='mm from a label center to the first photo of its strip, along y '
                              '(negative: the strip runs on below the label)')
@@ -49,6 +51,7 @@ def main():
     args = parser.parse_args()
     config_dir = os.path.expanduser('~/openpnp-sim' if args.sim else '~/.openpnp2')
     body = {'y': args.y, 'xFrom': args.x_from, 'xTo': args.x_to, 'step': args.step,
+            'yTolerance': args.y_tolerance,
             'tapeOffset': args.tape_offset, 'searchLength': args.search_length, 'z': args.z,
             'apply': args.apply,
             'reason': 'scan_feeders.py: set up strip feeders from their QR labels'}

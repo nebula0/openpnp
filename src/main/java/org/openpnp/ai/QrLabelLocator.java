@@ -43,9 +43,9 @@ public class QrLabelLocator {
     }
 
     /**
-     * Width the image is reduced to before reading.
+     * Widths the image is reduced to before reading, one after the other.
      */
-    public static final int WORKING_WIDTH = 1000;
+    public static final int[] WORKING_WIDTHS = {1000, 700, 1400};
 
     public static class Label {
         public final String text;
@@ -82,7 +82,23 @@ public class QrLabelLocator {
      * @return the labels that could be read, possibly none.
      */
     public static List<Label> find(Mat gray) {
-        double scale = Math.min(1.0, (double) WORKING_WIDTH / gray.cols());
+        // The detector misses codes now and then at one size and finds them at another.
+        List<Label> labels = new ArrayList<>();
+        for (int width : WORKING_WIDTHS) {
+            for (Label l : find(gray, width)) {
+                if (labels.stream()
+                          .noneMatch(o -> o.text.equals(l.text)
+                                  && Math.hypot(o.center.x - l.center.x,
+                                          o.center.y - l.center.y) < l.size / 2)) {
+                    labels.add(l);
+                }
+            }
+        }
+        return labels;
+    }
+
+    private static List<Label> find(Mat gray, int width) {
+        double scale = Math.min(1.0, (double) width / gray.cols());
         Mat small = new Mat();
         Mat points = new Mat();
         List<Label> labels = new ArrayList<>();

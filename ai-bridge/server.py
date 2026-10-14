@@ -420,7 +420,8 @@ def scan_qr_feeders(
     reason: str,
     confirm: bool = False,
     apply: bool = False,
-    step: float = 8,
+    step: float = 10,
+    y_tolerance: float = 4,
     tape_offset: float = -14,
     search_length: float = 80,
     tape_width: float = 8,
@@ -429,7 +430,8 @@ def scan_qr_feeders(
     """Set up strip feeders from QR labels at the start of each cut tape strip, without photos
     to look at. Also runs without the AI: ai-bridge/scan_feeders.py.
 
-    The top camera moves along y from x_from to x_to every step mm and reads the QR labels
+    The top camera moves along y from x_from to x_to every step mm, also y_tolerance mm above
+    and below in rows 2 mm apart (the camera sees only ~10.6 mm across y; 0: one row), and reads the QR labels
     (each names an OpenPnP part id, e.g. "C0603-1uF"). The labels are stuck on the strips, which
     run on from under them: it photographs each strip from tape_offset mm beside its label (along
     y, default below) and every 8 mm further, up to search_length mm, until parts show (used
@@ -444,7 +446,8 @@ def scan_qr_feeders(
     MOVES THE MACHINE (camera only, at Safe Z): first call without confirm to get the plan,
     ask the user, and only then call again with confirm=true. Afterwards the head is parked.
     """
-    body = {"y": y, "xFrom": x_from, "xTo": x_to, "step": step, "tapeOffset": tape_offset,
+    body = {"y": y, "xFrom": x_from, "xTo": x_to, "step": step, "yTolerance": y_tolerance,
+            "tapeOffset": tape_offset,
             "searchLength": search_length, "tapeWidth": tape_width, "z": z, "apply": apply, "confirm": confirm,
             "reason": reason}
     return json.dumps(_call("POST", "/feeder/scan-qr", body=body, timeout=JOB_TIMEOUT_S),

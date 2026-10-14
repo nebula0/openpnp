@@ -2246,8 +2246,9 @@ public class AiBridgeServer {
      * up to searchLength (default 80) mm on. The feed has to run away from the label, a strip
      * turned the other way round is reported.
      *
-     * Body: {y (the row of label centers), xFrom, xTo, step (default 8), tapeOffset (default
-     * -14), searchLength (default 80), tapeWidth (default 8), z (the tape surface, for new
+     * Body: {y (the row of label centers), xFrom, xTo, step (default 10), yTolerance (labels
+     * may be this far off y, default 4: rows of photos 2 mm apart), tapeOffset (default -14),
+     * searchLength (default 80), tapeWidth (default 8), z (the tape surface, for new
      * feeders without a similar one; default the Z of a strip feeder of the same package),
      * apply (default false), confirm}
      */
@@ -2260,8 +2261,17 @@ public class AiBridgeServer {
         double rowY = getDouble(body, "y", 0);
         double xFrom = Math.min(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
         double xTo = Math.max(getDouble(body, "xFrom", 0), getDouble(body, "xTo", 0));
-        double step = getDouble(body, "step", 8);
+        double step = getDouble(body, "step", 10);
         double tapeOffset = getDouble(body, "tapeOffset", -14);
+        // The camera sees only about 10.6 mm across y, hardly more than a label's 8 mm code,
+        // so rows of photos 2 mm apart cover labels up to yTolerance off the row.
+        double yTolerance = Math.min(10, Math.abs(getDouble(body, "yTolerance", 4)));
+        int sideRows = (int) Math.ceil(yTolerance / 2 - 1e-9);
+        double[] rowOffsets = new double[2 * sideRows + 1];
+        for (int k = 1; k <= sideRows; k++) {
+            rowOffsets[2 * k - 1] = -yTolerance * k / sideRows;
+            rowOffsets[2 * k] = yTolerance * k / sideRows;
+        }
         double searchLength = Math.min(200, Math.abs(getDouble(body, "searchLength", 80)));
         double tapeWidth = getDouble(body, "tapeWidth", 8);
         double givenZ = getDouble(body, "z", Double.NaN);
@@ -2274,10 +2284,13 @@ public class AiBridgeServer {
         }
         Camera camera = machine.getDefaultHead()
                                .getDefaultCamera();
-        int shots = (int) Math.floor((xTo - xFrom) / step + 1e-9) + 1;
+        int columns = (int) Math.floor((xTo - xFrom) / step + 1e-9) + 1;
+        int shots = columns * rowOffsets.length;
         JsonObject gate = gateMotion(machine, body, "Move camera " + camera.getName()
                 + " at Safe Z along y " + round(rowY) + " from x " + round(xFrom) + " to "
-                + round(xTo) + " (" + shots + " photos) to read the QR labels, then from "
+                + round(xTo) + (rowOffsets.length > 1 ? " and up to " + round(yTolerance)
+                        + " mm above and below" : "")
+                + " (" + shots + " photos) to read the QR labels, then from "
                 + round(tapeOffset) + " mm beside each label along y, up to "
                 + round(searchLength) + " mm on, to photograph its strip until parts show. "
                 + (apply ? "Updates or adds a strip feeder per label (new ones disabled). "
@@ -2296,12 +2309,14 @@ public class AiBridgeServer {
                                                          .getValue()
                     : givenZ;
             for (int i = 0; i < shots; i++) {
-                double x = xFrom + i * step;
+                double x = xFrom + (i / rowOffsets.length) * step;
+                double y = rowY + rowOffsets[i % rowOffsets.length];
                 MovableUtils.moveToLocationAtSafeZ(camera,
                         camera.getLocation()
                               .convertToUnits(LengthUnit.Millimeters)
-                              .derive(x, rowY, null, null));
+                              .derive(x, y, null, null));
                 BufferedImage frame = camera.lightSettleAndCapture();
+                saveScanFrame(frame, "label-x" + Math.round(x) + "-y" + Math.round(y));
                 Location upp = camera.getUnitsPerPixel(new Length(labelZ, LengthUnit.Millimeters))
                                      .convertToUnits(LengthUnit.Millimeters);
                 Mat color = OpenCvUtils.toMat(frame);
@@ -2312,7 +2327,7 @@ public class AiBridgeServer {
                         double dx = l.center.x - frame.getWidth() / 2.0;
                         double dy = l.center.y - frame.getHeight() / 2.0;
                         double lx = x + dx * upp.getX();
-                        double ly = rowY - dy * upp.getY();
+                        double ly = y - dy * upp.getY();
                         // Seen in several photos: keep the one nearest the photo's center.
                         int same = -1;
                         for (int k = 0; k < found.size(); k++) {
@@ -2527,9 +2542,13 @@ public class AiBridgeServer {
      * the tape's width around stripX, as neighbor strips may show at the sides. Runs on the
      * machine thread.
      */
-    private static StripTapeLocator.Result locateStripNear(Camera camera, double stripX,
-            double z, double tapeWidth) throws Exception {
+    private StripTapeLocator.Result locateStripNear(Camera camera, double stripX, double z,
+            double tapeWidth) throws Exception {
         BufferedImage frame = camera.lightSettleAndCapture();
+        saveScanFrame(frame, "strip-x" + Math.round(stripX) + "-y" + Math.round(
+                camera.getLocation()
+                      .convertToUnits(LengthUnit.Millimeters)
+                      .getY()));
         Location cameraLocation = camera.getLocation()
                                         .convertToUnits(LengthUnit.Millimeters);
         Location upp = camera.getUnitsPerPixel(new Length(z, LengthUnit.Millimeters))
@@ -2554,6 +2573,23 @@ public class AiBridgeServer {
         finally {
             color.release();
             gray.release();
+        }
+    }
+
+    /**
+     * Keeps a photo of the QR feeder scan, for checking later why a label or strip was missed.
+     */
+    private void saveScanFrame(BufferedImage frame, String what) {
+        File directory = new File(bridgeDirectory, "scan");
+        directory.mkdirs();
+        File file = new File(directory,
+                new SimpleDateFormat("yyyyMMdd-HHmmss-SSS").format(new Date()) + "-" + what
+                        + ".png");
+        try {
+            ImageIO.write(frame, "png", file);
+        }
+        catch (IOException e) {
+            Logger.warn(e, "AI bridge could not save scan photo {}", file);
         }
     }
 

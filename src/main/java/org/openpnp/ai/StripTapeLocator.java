@@ -169,16 +169,25 @@ public class StripTapeLocator {
 
     /**
      * Dark round blobs of about the hole diameter. Several thresholds are tried, since the
-     * surroundings of the tape may be dark too, and the most holes found wins.
+     * surroundings of the tape may be dark too, and the most holes found wins. On a strip cut
+     * close to its holes, a hole may merge with the dark surroundings through a thin dark
+     * neck, so each threshold is also tried after opening with a disk smaller than a hole,
+     * which cuts such necks.
      */
     static List<Point> findHoles(Mat gray, double mmPerPixel, PixelToMachine toMachine) {
         List<Point> best = new ArrayList<>();
         Mat blurred = new Mat();
         Imgproc.GaussianBlur(gray, blurred, new Size(9, 9), 0);
-        for (int threshold : new int[] {40, 60, 80, 100, 130}) {
+        int open = (int) Math.round(HOLE_DIAMETER * 0.73 / mmPerPixel) | 1;
+        Mat disk = Imgproc.getStructuringElement(Imgproc.MORPH_ELLIPSE, new Size(open, open));
+        for (int attempt = 0; attempt < 10; attempt++) {
+            int threshold = new int[] {40, 60, 80, 100, 130}[attempt / 2];
             List<Point> found = new ArrayList<>();
             Mat binary = new Mat();
             Imgproc.threshold(blurred, binary, threshold, 255, Imgproc.THRESH_BINARY_INV);
+            if (attempt % 2 == 1) {
+                Imgproc.morphologyEx(binary, binary, Imgproc.MORPH_OPEN, disk);
+            }
             List<MatOfPoint> contours = new ArrayList<>();
             Mat hierarchy = new Mat();
             Imgproc.findContours(binary, contours, hierarchy, Imgproc.RETR_EXTERNAL,
@@ -204,6 +213,7 @@ public class StripTapeLocator {
             }
         }
         blurred.release();
+        disk.release();
         return best;
     }
 
