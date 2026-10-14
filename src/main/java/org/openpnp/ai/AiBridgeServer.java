@@ -82,6 +82,7 @@ import org.openpnp.model.Job;
 import org.openpnp.model.Length;
 import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
+import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 import org.openpnp.model.Placement;
 import org.openpnp.model.PlacementsHolderLocation;
@@ -146,6 +147,12 @@ public class AiBridgeServer {
      * stops instead of picking the next one.
      */
     private static final int DEFAULT_MAX_PART_FAILURES = 5;
+    /**
+     * Inspection: how far a part may be off and turned, and how far to look for it.
+     */
+    private static final double DEFAULT_PLACEMENT_TOLERANCE_MM = 0.25;
+    private static final double DEFAULT_MAX_ROTATION_ERROR = 5;
+    private static final double PLACEMENT_SEARCH_MM = 1;
     private static final int MAX_IMAGE_DIMENSION = 800;
     private static final int MAX_BED_MAP_IMAGE_DIMENSION = 1600;
     private static final int MIN_INSPECT_IMAGE_DIMENSION = 600;
@@ -1509,6 +1516,12 @@ public class AiBridgeServer {
                 plan.append(describePlacement(machine, entry.getKey(), placement));
             }
         }
+        boolean captureBefore = getBoolean(body, "captureBefore", true);
+        Set<PlacementsHolderLocation<?>> fiducialLocations = fiducialLocations(selected);
+        if (captureBefore) {
+            plan.append("First the top camera takes a photo of each placement, for "
+                    + "inspect_placements to compare with later. ");
+        }
         plan.append("Uses the OpenPnP job processor (pick, bottom vision, place); "
                 + "afterwards the head is parked.");
 
@@ -1542,6 +1555,19 @@ public class AiBridgeServer {
                 : Math.max(1, maxFailures.getAsInt());
 
         JsonObject result = runLogged("job/place", body, machine, JOB_TIMEOUT_S, () -> {
+            int beforeFrames = 0;
+            if (captureBefore) {
+                Camera camera = machine.getDefaultHead()
+                                       .getDefaultCamera();
+                for (PlacementPhoto photo : photographPlacements(machine, camera, selected,
+                        fiducialLocations, new JsonArray())) {
+                    File file = beforeFrameFile(job, photo.boardLocation, photo.placement);
+                    file.getParentFile()
+                        .mkdirs();
+                    ImageIO.write(photo.frame, "png", file);
+                    beforeFrames++;
+                }
+            }
             JobProcessor processor = machine.getPnpJobProcessor();
             List<String> disabledFeeders = new ArrayList<>();
             List<String> rejectedParts = new ArrayList<>();
@@ -1624,6 +1650,7 @@ public class AiBridgeServer {
                         + (error == null ? "none, see the OpenPnP log" : error));
             }
             o.add("placements", placed);
+            o.addProperty("beforePhotos", beforeFrames);
             o.add("feedersDisabled", gson.toJsonTree(disabledFeeders));
             o.add("partsRejected", gson.toJsonTree(rejectedParts));
             return o;
@@ -1698,20 +1725,17 @@ public class AiBridgeServer {
                 selectPlacements(job, body, false, new ArrayList<>());
         Camera camera = machine.getDefaultHead()
                                .getDefaultCamera();
-        // Like the job processor, locate the boards and panels that check fiducials first, outer
-        // panels before what they contain, so that the expected locations match the real board.
-        Set<PlacementsHolderLocation<?>> fiducialLocations = new LinkedHashSet<>();
-        for (BoardLocation boardLocation : selected.keySet()) {
-            List<PlacementsHolderLocation<?>> chain = new ArrayList<>();
-            for (PlacementsHolderLocation<?> l = boardLocation; l != null; l = l.getParent()) {
-                chain.add(0, l);
-            }
-            for (PlacementsHolderLocation<?> l : chain) {
-                if (l.isCheckFiducials()) {
-                    fiducialLocations.add(l);
-                }
-            }
+        String images = getString(body, "images");
+        if (images == null) {
+            images = "failures";
         }
+        if (!images.equals("all") && !images.equals("failures") && !images.equals("none")) {
+            throw new BadRequest("images must be all, failures or none.");
+        }
+        String imagesWanted = images;
+        double tolerance = getDouble(body, "toleranceMm", DEFAULT_PLACEMENT_TOLERANCE_MM);
+        double maxRotation = getDouble(body, "maxRotationDegrees", DEFAULT_MAX_ROTATION_ERROR);
+        Set<PlacementsHolderLocation<?>> fiducialLocations = fiducialLocations(selected);
         StringBuilder plan = new StringBuilder("Move camera " + camera.getName() + " at Safe Z "
                 + (fiducialLocations.isEmpty() ? ""
                         : "over the fiducials of " + fiducialLocations.size()
@@ -1736,65 +1760,294 @@ public class AiBridgeServer {
 
         return runLogged("job/inspect", body, machine, JOB_TIMEOUT_S, () -> {
             JsonArray fiducialsChecked = new JsonArray();
-            if (!fiducialLocations.isEmpty()) {
-                machine.getFiducialLocator()
-                       .locateAllPlacementsHolder(new ArrayList<>(fiducialLocations), null);
-                for (PlacementsHolderLocation<?> l : fiducialLocations) {
-                    fiducialsChecked.add(new JsonPrimitive(l.getUniqueId()));
-                }
-            }
+            List<PlacementPhoto> photos = photographPlacements(machine, camera, selected,
+                    fiducialLocations, fiducialsChecked);
             JsonArray results = new JsonArray();
-            JsonArray images = new JsonArray();
-            for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
-                for (Placement placement : entry.getValue()) {
-                    Location location =
-                            Utils2D.calculateBoardPlacementLocation(entry.getKey(), placement)
-                                   .convertToUnits(LengthUnit.Millimeters);
-                    // The camera Z only sets the viewing plane, for the right scale.
-                    MovableUtils.moveToLocationAtSafeZ(camera,
-                            camera.getLocation()
-                                  .convertToUnits(LengthUnit.Millimeters)
-                                  .derive(location.getX(), location.getY(), location.getZ(),
-                                          null));
-                    BufferedImage frame = camera.lightSettleAndCapture();
-                    File frameFile = saveInspectionFrame(frame, entry.getKey(), placement);
-                    Location upp = camera.getUnitsPerPixelAtZ()
-                                         .convertToUnits(LengthUnit.Millimeters);
-                    String name = entry.getKey()
-                                       .getUniqueId()
-                            + " " + placement.getId();
-                    JsonObject r = new JsonObject();
-                    r.addProperty("boardId", entry.getKey()
-                                                  .getUniqueId());
-                    r.addProperty("placementId", placement.getId());
-                    r.addProperty("partId", placement.getPart()
-                                                     .getId());
-                    r.add("expectedLocation", toJson(location));
-                    BodyLocator.Result partBody = measureBody(frame, placement, location, upp, r);
+            JsonArray imageArray = new JsonArray();
+            Map<String, Integer> verdicts = new LinkedHashMap<>();
+            for (PlacementPhoto photo : photos) {
+                File frameFile = saveInspectionFrame(photo.frame, photo.boardLocation,
+                        photo.placement);
+                String name = photo.boardLocation.getUniqueId() + " " + photo.placement.getId();
+                JsonObject r = new JsonObject();
+                r.addProperty("boardId", photo.boardLocation.getUniqueId());
+                r.addProperty("placementId", photo.placement.getId());
+                r.addProperty("partId", photo.placement.getPart()
+                                                       .getId());
+                r.add("expectedLocation", toJson(photo.location));
+                File beforeFile = beforeFrameFile(job, photo.boardLocation, photo.placement);
+                Measured measured = measurePlacement(photo, beforeFile, tolerance, maxRotation, r);
+                String verdict = getString(r, "verdict");
+                verdicts.merge(verdict, 1, Integer::sum);
+                r.addProperty("frameFile", frameFile == null ? null
+                        : frameFile.getAbsolutePath());
+                if (imagesWanted.equals("all")
+                        || (imagesWanted.equals("failures") && !verdict.equals("ok"))) {
                     r.addProperty("image", name);
-                    r.addProperty("frameFile", frameFile == null ? null
-                            : frameFile.getAbsolutePath());
-                    results.add(r);
                     JsonObject i = new JsonObject();
                     i.addProperty("name", name);
                     i.addProperty("mimeType", "image/png");
-                    i.addProperty("data", toPngBase64(
-                            drawExpectedFootprint(frame, placement, location, upp, partBody),
-                            MAX_IMAGE_DIMENSION));
-                    images.add(i);
+                    i.addProperty("data",
+                            toPngBase64(drawExpectedFootprint(photo.frame, photo.placement,
+                                    photo.location, photo.upp, measured.rect, measured.changed),
+                                    MAX_IMAGE_DIMENSION));
+                    imageArray.add(i);
                 }
+                if (measured.changed != null) {
+                    measured.changed.release();
+                }
+                results.add(r);
             }
             JsonObject o = ok();
             o.add("fiducialsChecked", fiducialsChecked);
+            o.add("verdicts", gson.toJsonTree(verdicts));
             o.add("placements", results);
-            o.addProperty("legend", "Drawn where the job expects the part: body outline green, "
-                    + "pads cyan, pin 1 red dot, image center (camera position) yellow cross. "
-                    + "The measured body is drawn in magenta. measured.offsetX/Y is the measured "
-                    + "minus the expected body center in machine mm, rotationError in degrees "
+            o.addProperty("legend", "verdict: ok, check (see reasons), missing (nothing changed "
+                    + "since the photo before placing) or unverified (no photo before placing, "
+                    + "judge from the image). Images (per the images option): drawn where the job "
+                    + "expects the part, body outline green, pads cyan, pin 1 red dot, image "
+                    + "center yellow cross; the part found magenta; what changed since the photo "
+                    + "before placing tinted red. measured.offsetX/Y is the found minus the "
+                    + "expected center in machine mm, rotationError in degrees "
                     + "counterclockwise.");
-            o.add("images", images);
+            o.add("images", imageArray);
             return o;
         });
+    }
+
+    /**
+     * A photo of a placement, taken with the camera centered on its expected location.
+     */
+    private static class PlacementPhoto {
+        final BoardLocation boardLocation;
+        final Placement placement;
+        final Location location;
+        final BufferedImage frame;
+        final Location upp;
+
+        PlacementPhoto(BoardLocation boardLocation, Placement placement, Location location,
+                BufferedImage frame, Location upp) {
+            this.boardLocation = boardLocation;
+            this.placement = placement;
+            this.location = location;
+            this.frame = frame;
+            this.upp = upp;
+        }
+    }
+
+    /**
+     * Like the job processor, the boards and panels that check fiducials, outer panels before
+     * what they contain, so that the expected locations match the real board.
+     */
+    private static Set<PlacementsHolderLocation<?>> fiducialLocations(
+            Map<BoardLocation, List<Placement>> selected) {
+        Set<PlacementsHolderLocation<?>> fiducialLocations = new LinkedHashSet<>();
+        for (BoardLocation boardLocation : selected.keySet()) {
+            List<PlacementsHolderLocation<?>> chain = new ArrayList<>();
+            for (PlacementsHolderLocation<?> l = boardLocation; l != null; l = l.getParent()) {
+                chain.add(0, l);
+            }
+            for (PlacementsHolderLocation<?> l : chain) {
+                if (l.isCheckFiducials()) {
+                    fiducialLocations.add(l);
+                }
+            }
+        }
+        return fiducialLocations;
+    }
+
+    /**
+     * Locates the fiducials, then moves the camera over each placement and takes a photo. Runs on
+     * the machine thread.
+     */
+    private static List<PlacementPhoto> photographPlacements(Machine machine, Camera camera,
+            Map<BoardLocation, List<Placement>> selected,
+            Set<PlacementsHolderLocation<?>> fiducialLocations, JsonArray fiducialsChecked)
+            throws Exception {
+        if (!fiducialLocations.isEmpty()) {
+            machine.getFiducialLocator()
+                   .locateAllPlacementsHolder(new ArrayList<>(fiducialLocations), null);
+            for (PlacementsHolderLocation<?> l : fiducialLocations) {
+                fiducialsChecked.add(new JsonPrimitive(l.getUniqueId()));
+            }
+        }
+        List<PlacementPhoto> photos = new ArrayList<>();
+        for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+            for (Placement placement : entry.getValue()) {
+                Location location =
+                        Utils2D.calculateBoardPlacementLocation(entry.getKey(), placement)
+                               .convertToUnits(LengthUnit.Millimeters);
+                // The camera Z only sets the viewing plane, for the right scale.
+                MovableUtils.moveToLocationAtSafeZ(camera,
+                        camera.getLocation()
+                              .convertToUnits(LengthUnit.Millimeters)
+                              .derive(location.getX(), location.getY(), location.getZ(), null));
+                BufferedImage frame = camera.lightSettleAndCapture();
+                Location upp = camera.getUnitsPerPixelAtZ()
+                                     .convertToUnits(LengthUnit.Millimeters);
+                photos.add(new PlacementPhoto(entry.getKey(), placement, location, frame, upp));
+            }
+        }
+        return photos;
+    }
+
+    /**
+     * Where the photo of a placement taken before placing is kept, per job file, board and
+     * placement. A new one replaces the old.
+     */
+    private File beforeFrameFile(Job job, BoardLocation boardLocation, Placement placement) {
+        File directory = new File(bridgeDirectory, "inspect/before");
+        String jobKey = Integer.toHexString(job.getFile()
+                                               .getAbsolutePath()
+                                               .hashCode());
+        return new File(directory, jobKey + "-" + (boardLocation.getUniqueId() + "-"
+                + placement.getId()).replaceAll("[^A-Za-z0-9._-]", "_") + ".png");
+    }
+
+    /**
+     * The part found in an inspection photo, for drawing.
+     */
+    private static class Measured {
+        final RotatedRect rect;
+        final Mat changed;
+
+        Measured(RotatedRect rect, Mat changed) {
+            this.rect = rect;
+            this.changed = changed;
+        }
+    }
+
+    /**
+     * Measures where the part of a placement is and judges it: by comparing with the photo taken
+     * before placing if there is one, else as a dark body (which suits IC bodies only). Adds
+     * "measured", "verdict" and "reasons" to r.
+     */
+    private static Measured measurePlacement(PlacementPhoto photo, File beforeFile,
+            double tolerance, double maxRotation, JsonObject r) throws IOException {
+        BufferedImage before = beforeFile.exists() ? ImageIO.read(beforeFile) : null;
+        if (before == null || before.getWidth() != photo.frame.getWidth()
+                || before.getHeight() != photo.frame.getHeight()) {
+            BodyLocator.Result body =
+                    measureBody(photo.frame, photo.placement, photo.location, photo.upp, r);
+            r.getAsJsonObject("measured")
+             .addProperty("method", "body");
+            r.addProperty("verdict", "unverified");
+            JsonArray reasons = new JsonArray();
+            reasons.add(new JsonPrimitive("No photo from before placing; the dark body search "
+                    + "only suits IC bodies. Judge from the image."));
+            r.add("reasons", reasons);
+            return new Measured(body == null ? null : body.rect, null);
+        }
+
+        JsonObject m = new JsonObject();
+        r.add("measured", m);
+        m.addProperty("method", "diff");
+        Package pkg = photo.placement.getPart()
+                                     .getPackage();
+        Footprint footprint = pkg == null ? null : pkg.getFootprint();
+        double mm = footprint == null ? 1
+                : new Length(1, footprint.getUnits()).convertToUnits(LengthUnit.Millimeters)
+                                                     .getValue();
+        boolean hasBody = footprint != null && footprint.getBodyWidth() > 0
+                && footprint.getBodyHeight() > 0;
+        // Without a body size, use the pads' extent.
+        Rectangle2D extent = footprint == null ? new Rectangle2D.Double(-0.5, -0.5, 1, 1)
+                : hasBody ? footprint.getBodyShape()
+                                     .getBounds2D()
+                        : footprint.getPadsShape()
+                                   .getBounds2D();
+        double length = Math.max(extent.getWidth(), extent.getHeight()) * mm;
+        double width = Math.min(extent.getWidth(), extent.getHeight()) * mm;
+        double expectedAxis =
+                photo.location.getRotation() + (extent.getWidth() >= extent.getHeight() ? 0 : 90);
+        double px = photo.upp.getX();
+        Mat beforeMat = OpenCvUtils.toMat(before);
+        Mat afterMat = OpenCvUtils.toMat(photo.frame);
+        Mat beforeGray = new Mat();
+        Mat afterGray = new Mat();
+        PlacementDiff.Result d;
+        try {
+            toGray(beforeMat, beforeGray);
+            toGray(afterMat, afterGray);
+            org.opencv.core.Point center =
+                    new org.opencv.core.Point(photo.frame.getWidth() / 2.0,
+                            photo.frame.getHeight() / 2.0);
+            d = PlacementDiff.measure(beforeGray, afterGray, center, length / px, width / px,
+                    Math.max(PLACEMENT_SEARCH_MM, width) / px);
+        }
+        finally {
+            beforeMat.release();
+            afterMat.release();
+            beforeGray.release();
+            afterGray.release();
+        }
+        m.addProperty("cameraShiftX", round(d.shift.x * px));
+        m.addProperty("cameraShiftY", round(-d.shift.y * photo.upp.getY()));
+        m.addProperty("changedArea", round(d.changedArea * px * px));
+        m.addProperty("otherChangedArea", round(d.otherChangedArea * px * px));
+        JsonArray reasons = new JsonArray();
+        String verdict;
+        if (!d.isFound()) {
+            m.addProperty("found", false);
+            verdict = "missing";
+            reasons.add(new JsonPrimitive("Hardly anything changed near the expected location "
+                    + "since the photo before placing."));
+        }
+        else {
+            // Image y grows downwards, machine y upwards.
+            double offsetX = (d.center.x - photo.frame.getWidth() / 2.0) * px;
+            double offsetY = -(d.center.y - photo.frame.getHeight() / 2.0) * photo.upp.getY();
+            double rotationError = BodyLocator.normalizeHalfTurn(d.angle - expectedAxis);
+            double offset = Math.hypot(offsetX, offsetY);
+            m.addProperty("found", true);
+            m.addProperty("offsetX", round(offsetX));
+            m.addProperty("offsetY", round(offsetY));
+            m.addProperty("offset", round(offset));
+            m.addProperty("rotationError", Math.round(rotationError * 10) / 10.0);
+            m.addProperty("length", round(d.length * px));
+            m.addProperty("width", round(d.width * px));
+            m.addProperty("expectedLength", round(length));
+            m.addProperty("expectedWidth", round(width));
+            if (offset > tolerance) {
+                reasons.add(new JsonPrimitive("Offset " + round(offset)
+                        + " mm is over the tolerance of " + round(tolerance) + " mm."));
+            }
+            // A square part has no long side to tell its rotation from.
+            if (length > width * 1.2 && Math.abs(rotationError) > maxRotation) {
+                reasons.add(new JsonPrimitive("Rotation error " + round(rotationError)
+                        + " degrees is over " + round(maxRotation) + "."));
+            }
+            double lengthRatio = d.length * px / length;
+            double widthRatio = d.width * px / width;
+            if (lengthRatio < 0.6 || lengthRatio > 1.6 || widthRatio < 0.5
+                    || widthRatio > 2.0) {
+                reasons.add(new JsonPrimitive("The changed area of " + round(d.length * px)
+                        + " x " + round(d.width * px) + " mm does not match the part's "
+                        + round(length) + " x " + round(width)
+                        + " mm: wrong part, tombstoned, or something else moved near it."));
+            }
+            verdict = reasons.size() == 0 ? "ok" : "check";
+        }
+        if (d.otherChangedArea * px * px > Math.max(0.3 * length * width, 0.1)) {
+            reasons.add(new JsonPrimitive("Something else in the photo changed too ("
+                    + round(d.otherChangedArea * px * px) + " mm2), e.g. a neighbor that was "
+                    + "pushed away."));
+            if (verdict.equals("ok")) {
+                verdict = "check";
+            }
+        }
+        r.addProperty("verdict", verdict);
+        r.add("reasons", reasons);
+        return new Measured(d.rect, d.mask);
+    }
+
+    private static void toGray(Mat color, Mat gray) {
+        if (color.channels() == 1) {
+            color.copyTo(gray);
+        }
+        else {
+            Imgproc.cvtColor(color, gray, Imgproc.COLOR_BGR2GRAY);
+        }
     }
 
     /**
@@ -1895,8 +2148,13 @@ public class AiBridgeServer {
         return body;
     }
 
+    /**
+     * @param measured the part found, drawn in magenta, or null.
+     * @param changed pixels that changed since the photo before placing (255), tinted red, or
+     *        null.
+     */
     private static BufferedImage drawExpectedFootprint(BufferedImage frame, Placement placement,
-            Location location, Location upp, BodyLocator.Result body) {
+            Location location, Location upp, RotatedRect measured, Mat changed) {
         Part part = placement.getPart();
         Footprint footprint =
                 part.getPackage() == null ? null : part.getPackage()
@@ -1907,6 +2165,21 @@ public class AiBridgeServer {
                 new BufferedImage(frame.getWidth(), frame.getHeight(), BufferedImage.TYPE_INT_RGB);
         Graphics2D g = out.createGraphics();
         g.drawImage(frame, 0, 0, null);
+        if (changed != null) {
+            byte[] mask = new byte[changed.cols() * changed.rows()];
+            changed.get(0, 0, mask);
+            for (int y = 0; y < out.getHeight(); y++) {
+                for (int x = 0; x < out.getWidth(); x++) {
+                    if (mask[y * changed.cols() + x] != 0) {
+                        int rgb = out.getRGB(x, y);
+                        int r = ((rgb >> 16) & 0xff) / 2 + 128;
+                        int gr = ((rgb >> 8) & 0xff) / 2;
+                        int b = (rgb & 0xff) / 2;
+                        out.setRGB(x, y, (r << 16) | (gr << 8) | b);
+                    }
+                }
+            }
+        }
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         Rectangle2D extent = new Rectangle2D.Double(cx - 1 / upp.getX(), cy - 1 / upp.getY(),
                 2 / upp.getX(), 2 / upp.getY());
@@ -1945,9 +2218,9 @@ public class AiBridgeServer {
         g.setColor(new Color(255, 255, 0, 220));
         g.draw(new Line2D.Double(cx - arm, cy, cx + arm, cy));
         g.draw(new Line2D.Double(cx, cy - arm, cx, cy + arm));
-        if (body != null) {
+        if (measured != null) {
             org.opencv.core.Point[] p = new org.opencv.core.Point[4];
-            body.rect.points(p);
+            measured.points(p);
             java.awt.geom.Path2D.Double outline = new java.awt.geom.Path2D.Double();
             outline.moveTo(p[0].x, p[0].y);
             for (int k = 1; k < 4; k++) {
@@ -1956,8 +2229,8 @@ public class AiBridgeServer {
             outline.closePath();
             g.setColor(new Color(255, 0, 255, 220));
             g.draw(outline);
-            g.fill(new Ellipse2D.Double(body.center.x - arm / 6, body.center.y - arm / 6, arm / 3,
-                    arm / 3));
+            g.fill(new Ellipse2D.Double(measured.center.x - arm / 6, measured.center.y - arm / 6,
+                    arm / 3, arm / 3));
         }
         g.dispose();
 

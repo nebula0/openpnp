@@ -220,6 +220,7 @@ def place_from_job(
     reason: str,
     confirm: bool = False,
     max_part_failures: int | None = None,
+    capture_before: bool = True,
 ) -> str:
     """Place parts of a job file with OpenPnP's own job processor: the nozzle with a fitting
     tip picks from an enabled feeder, bottom vision aligns the part and it is placed on the
@@ -238,9 +239,11 @@ def place_from_job(
     too far off, it is discarded and the next part is picked, until max_part_failures parts
     (default 5) fail in a row; partsRejected lists why. On failure the job processor discards
     what was picked, and nozzlesAfterFailure shows what is left.
+    With capture_before (default) the top camera first photographs each placement, so that
+    inspect_placements can find the part by what changed (beforePhotos counts them).
     """
     body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason,
-            "maxPartFailures": max_part_failures}
+            "maxPartFailures": max_part_failures, "captureBefore": capture_before}
     return json.dumps(_call("POST", "/job/place", body=body, timeout=JOB_TIMEOUT_S),
                       ensure_ascii=False, indent=1)
 
@@ -251,23 +254,34 @@ def inspect_placements(
     placements: list[dict],
     reason: str,
     confirm: bool = False,
+    images: str = "failures",
+    tolerance_mm: float = 0.25,
+    max_rotation_degrees: float = 5,
 ) -> list:
-    """Photograph placed parts to check them: the top camera moves over each placement of a
-    job file and takes a photo, with the part's footprint drawn where the job expects it
-    (body outline green, pads cyan, pin 1 red dot, camera center yellow cross). Compare the
-    real part with the drawing for offset, rotation, polarity (pin 1) and missing parts.
+    """Check placed parts: the top camera moves over each placement of a job file, takes a
+    photo and judges it, so that photos need to be looked at only for parts that failed or
+    for spot checks.
 
-    Each placement also gets "measured": the part body is searched as a dark rectangle of the
-    footprint's body size (drawn in magenta), giving offsetX/offsetY (measured minus expected,
-    machine mm) and rotationError (degrees, counterclockwise). This suits IC bodies on a
-    lighter board; when found is false, judge from the image. The measurement cannot tell
-    pin 1 from the opposite end, so check polarity in the image.
+    If place_from_job took a photo before placing (its default), the part is found by what
+    changed since then, whatever its color, and each placement gets a verdict: "ok", "check"
+    (reasons: offset over tolerance_mm, rotation over max_rotation_degrees, size of the change
+    not matching the part, or something else in the photo changed, e.g. a pushed neighbor) or
+    "missing" (nothing changed). Without a photo from before, the verdict is "unverified": a
+    dark body search only suits IC bodies, judge from the image. measured.offsetX/offsetY is
+    found minus expected in machine mm, rotationError in degrees counterclockwise. Neither
+    method can tell pin 1 from the opposite end: check polarity in the image.
+
+    images: "failures" (default, only placements whose verdict is not ok), "all" or "none".
+    Images show the footprint where the job expects it (body green, pads cyan, pin 1 red dot,
+    image center yellow cross), the part found in magenta and what changed tinted red.
 
     placements: [{"boardId": "Pnl1⇒Brd1", "placementId": "U1"}, ...] as for place_from_job.
     MOVES THE MACHINE (camera only, at Safe Z, no pick or place): first call without confirm
     to get the plan, ask the user, and only then call again with confirm=true.
     """
-    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason}
+    body = {"file": job_file, "placements": placements, "confirm": confirm, "reason": reason,
+            "images": images, "toleranceMm": tolerance_mm,
+            "maxRotationDegrees": max_rotation_degrees}
     return _with_images(_call("POST", "/job/inspect", body=body, timeout=JOB_TIMEOUT_S))
 
 
