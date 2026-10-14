@@ -73,7 +73,9 @@ import org.openpnp.machine.reference.ReferenceNozzle;
 import org.openpnp.machine.reference.ReferenceNozzleTip;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
+import org.openpnp.machine.reference.vision.ReferenceBottomVision;
 import org.openpnp.model.BoardLocation;
+import org.openpnp.model.BottomVisionSettings;
 import org.openpnp.model.Configuration;
 import org.openpnp.model.Footprint;
 import org.openpnp.model.Job;
@@ -100,6 +102,8 @@ import org.openpnp.util.Utils2D;
 import org.openpnp.util.VisionUtils;
 import org.openpnp.vision.pipeline.CvPipeline;
 import org.openpnp.vision.pipeline.CvStage;
+import org.openpnp.vision.pipeline.stages.ImageCapture;
+import org.openpnp.vision.pipeline.stages.Threshold;
 import org.pmw.tinylog.Logger;
 
 import com.google.gson.Gson;
@@ -300,6 +304,8 @@ public class AiBridgeServer {
                     return probeFeederZ(body);
                 case "/feeder/update":
                     return updateFeeder(body);
+                case "/vision/bottom/test":
+                    return testBottomVision(body);
             }
         }
         return null;
@@ -949,6 +955,146 @@ public class AiBridgeServer {
         }
         logAction("feeder/update", body, o);
         return o;
+    }
+
+    /**
+     * Runs the bottom vision of the part on a nozzle once, as the job processor would, but
+     * without placing: the nozzle goes over the bottom camera and the part's vision pipeline is
+     * processed. Returns what was found and the images of the pipeline, also when nothing was
+     * found. The part stays on the nozzle.
+     *
+     * Body: {nozzleId (optional, default the nozzle holding a part), rotation (degrees, default
+     * 0), threshold (optional, overrides the Threshold stages for this run only), confirm}
+     */
+    private JsonObject testBottomVision(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Nozzle nozzle = null;
+        String nozzleId = getString(body, "nozzleId");
+        if (nozzleId != null) {
+            nozzle = findNozzle(machine, nozzleId);
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle with id or name " + nozzleId);
+            }
+        }
+        else {
+            for (Head head : machine.getHeads()) {
+                for (Nozzle n : head.getNozzles()) {
+                    if (nozzle == null && n.getPart() != null) {
+                        nozzle = n;
+                    }
+                }
+            }
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle holds a part. Pick one first, e.g. with "
+                        + "pick_from_feeder and returnPart false.");
+            }
+        }
+        Part part = nozzle.getPart();
+        if (part == null) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " holds no part.");
+        }
+        double rotation = getDouble(body, "rotation", 0);
+        double thresholdValue = getDouble(body, "threshold", Double.NaN);
+        if (!Double.isNaN(thresholdValue) && (thresholdValue < 0 || thresholdValue > 255)) {
+            throw new BadRequest("threshold must be between 0 and 255.");
+        }
+        ReferenceBottomVision bottomVision = ReferenceBottomVision.getDefault();
+        BottomVisionSettings settings = bottomVision.getInheritedVisionSettings(part);
+        Camera camera = VisionUtils.getBottomVisionCamera();
+        Nozzle visionNozzle = nozzle;
+
+        JsonObject gate = gateMotion(machine, body, "Move nozzle " + nozzle.getName() + " with its "
+                + part.getId() + " at Safe Z over the bottom camera " + camera.getName()
+                + ", run the bottom vision \"" + settings.getName() + "\""
+                + (Double.isNaN(thresholdValue) ? ""
+                        : " with threshold " + (int) thresholdValue + " for this run only")
+                + " and lift to Safe Z. The part stays on the nozzle, nothing is placed.");
+        if (gate != null) {
+            return gate;
+        }
+
+        return runLogged("vision/bottom/test", body, machine, () -> {
+            Location wanted = bottomVision.getCameraLocationAtPartHeight(part, camera,
+                    visionNozzle, rotation);
+            JsonObject o = ok();
+            o.addProperty("nozzleName", visionNozzle.getName());
+            o.addProperty("partId", part.getId());
+            o.addProperty("packageId", part.getPackage()
+                                           .getId());
+            o.addProperty("visionSettings", settings.getName());
+            o.add("cameraLocationAtPartHeight", toJson(wanted));
+            JsonArray images = new JsonArray();
+            try (CvPipeline pipeline = settings.getPipeline()) {
+                bottomVision.preparePipeline(pipeline, settings.getPipelineParameterAssignments(),
+                        camera, part.getPackage(), visionNozzle, visionNozzle.getNozzleTip(),
+                        wanted, wanted, settings);
+                JsonArray thresholds = new JsonArray();
+                for (CvStage stage : pipeline.getStages()) {
+                    if (stage instanceof Threshold && stage.isEnabled()) {
+                        if (!Double.isNaN(thresholdValue)) {
+                            ((Threshold) stage).setThreshold((int) thresholdValue);
+                        }
+                        thresholds.add(new JsonPrimitive(((Threshold) stage).getThreshold()));
+                    }
+                }
+                o.add("thresholds", thresholds);
+                Location upp = camera.getUnitsPerPixelAtZ()
+                                     .convertToUnits(LengthUnit.Millimeters);
+                JsonArray shots = new JsonArray();
+                int shotIndex = 0;
+                for (CvPipeline.PipelineShot shot : pipeline.getPipelineShots()) {
+                    shot.apply();
+                    pipeline.process();
+                    JsonObject s = new JsonObject();
+                    CvStage.Result result = pipeline.getResult(VisionUtils.PIPELINE_RESULTS_NAME);
+                    Object model = result == null ? null : result.model;
+                    s.addProperty("found", model instanceof RotatedRect);
+                    if (model instanceof RotatedRect) {
+                        RotatedRect rect = (RotatedRect) model;
+                        Location offsets =
+                                VisionUtils.getPixelCenterOffsets(camera, rect.center.x,
+                                        rect.center.y)
+                                           .convertToUnits(LengthUnit.Millimeters);
+                        s.addProperty("offsetX", round(offsets.getX()));
+                        s.addProperty("offsetY", round(offsets.getY()));
+                        s.addProperty("angle", round(VisionUtils.getPixelAngle(camera,
+                                rect.angle)));
+                        s.addProperty("widthMm", round(rect.size.width * upp.getX()));
+                        s.addProperty("heightMm", round(rect.size.height * upp.getY()));
+                    }
+                    shots.add(s);
+                    for (CvStage stage : pipeline.getStages()) {
+                        boolean source = stage instanceof ImageCapture;
+                        boolean threshold = stage instanceof Threshold;
+                        CvStage.Result r = pipeline.getResult(stage);
+                        if ((source || threshold) && stage.isEnabled() && r != null
+                                && r.image != null) {
+                            images.add(namedImage("shot" + shotIndex + "-" + stage.getName(),
+                                    OpenCvUtils.toBufferedImage(r.image)));
+                        }
+                    }
+                    images.add(namedImage("shot" + shotIndex + "-final",
+                            OpenCvUtils.toBufferedImage(pipeline.getWorkingImage())));
+                    shotIndex++;
+                }
+                o.add("shots", shots);
+                o.addProperty("mmPerPixel", upp.getX());
+            }
+            o.add("images", images);
+            o.addProperty("legend", "Images per shot: the camera image, the Threshold stage "
+                    + "output (white = above the threshold) and the final image with the "
+                    + "rectangle found, if any.");
+            return o;
+        });
+    }
+
+    private static JsonObject namedImage(String name, BufferedImage image) throws IOException {
+        JsonObject i = new JsonObject();
+        i.addProperty("name", name);
+        i.addProperty("mimeType", "image/png");
+        i.addProperty("data", toPngBase64(image, 800));
+        return i;
     }
 
     /**

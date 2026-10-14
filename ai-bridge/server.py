@@ -331,6 +331,31 @@ def probe_feeder_z(
 
 
 @mcp.tool()
+def test_bottom_vision(
+    reason: str,
+    confirm: bool = False,
+    nozzle_id: str | None = None,
+    rotation: float = 0,
+    threshold: int | None = None,
+) -> list:
+    """Run the bottom vision of the part on a nozzle once, without placing it.
+
+    The nozzle (default: the one holding a part) goes over the bottom camera at Safe Z and the
+    part's bottom vision pipeline runs as in a job. Returns per shot found, offsetX/offsetY (mm),
+    angle and the size found (widthMm/heightMm), plus the camera image, the Threshold stage output
+    and the final image, also when nothing was found. threshold overrides the Threshold stages for
+    this run only (nothing is saved), so several values can be tried with the same part. The part
+    stays on the nozzle: pick it first with pick_from_feeder(return_part=False), discard it after.
+
+    MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
+    call again with confirm=true.
+    """
+    body = {"nozzleId": nozzle_id, "rotation": rotation, "threshold": threshold,
+            "confirm": confirm, "reason": reason}
+    return _with_images(_call("POST", "/vision/bottom/test", body=body))
+
+
+@mcp.tool()
 def update_feeder(
     feeder_id: str,
     reason: str,
