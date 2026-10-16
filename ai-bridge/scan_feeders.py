@@ -128,8 +128,10 @@ def main():
                         help='after --apply, check the new feeders and enable those that pass')
     parser.add_argument('--verify-all', action='store_true',
                         help='like --verify, for the updated feeders too')
-    parser.add_argument('--contact-drop', type=float, default=2,
-                        help='vacuum drop that counts as contact when probing (default 2)')
+    parser.add_argument('--contact-drop', type=float,
+                        help='vacuum drop below the level in the air that counts as contact when '
+                             'probing (default: the nozzle tip\'s part on level; with the '
+                             'two-byte vacuum reading a part drops it by about 600)')
     parser.add_argument('--min-floor-z', type=float, default=7.0,
                         help='never probe below this Z (default 7.0)')
     parser.add_argument('--sim', action='store_true', help='use the simulation config')

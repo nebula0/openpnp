@@ -41,6 +41,7 @@
 ## 量取料高度（`probe_feeder_z`）
 
 ### `The vacuum level ... is too close to the contact threshold`
+- 10/16 起真空讀兩個位元組，數值是負的、約 256 倍大（空中約 −6560）。舊的 `contact_drop=2` 現在只是雜訊；N045 不給 `contact_drop` 就會用吸嘴頭的 part-on 上限（−6900）。其他吸嘴頭要先用 `read_nozzle_vacuum` 量空的和有零件的讀值，設好 part-on 範圍。
 - 原因：吸嘴頭設定的 part on/off 真空範圍是沒用過的預設值，不適合這個吸嘴頭。N045 的空中讀值是 229–230，比設定的「沒零件」範圍 248–255 還低。
 - 先試：帶 `contact_drop`（例如 2）。門檻就會變成「空中讀值 − contact_drop」。
 

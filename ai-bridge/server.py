@@ -173,6 +173,17 @@ def camera_properties(camera: str, reason: str, set: dict | None = None,
 
 
 @mcp.tool()
+def read_nozzle_vacuum(nozzle_id: str, reason: str, samples: int = 10, settle_ms: int = 500) -> str:
+    """Read a nozzle's vacuum sensor several times with its vacuum on, where the nozzle is
+    (does not move). Returns mean, min, max and the raw replies. Compare an empty nozzle with
+    one holding a part to set the part on/off thresholds. The vacuum is turned off afterwards
+    unless OpenPnP thinks the nozzle holds a part.
+    """
+    body = {"nozzleId": nozzle_id, "samples": samples, "settleMs": settle_ms, "reason": reason}
+    return json.dumps(_call("POST", "/nozzle/vacuum", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
 def calibrate_nozzle_tip(reason: str, confirm: bool = False, nozzle_id: str | None = None) -> str:
     """Calibrate the nozzle tip on a nozzle, like its Calibrate button in OpenPnP.
 

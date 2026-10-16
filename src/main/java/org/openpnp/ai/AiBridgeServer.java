@@ -309,6 +309,8 @@ public class AiBridgeServer {
                     return discardPart(body);
                 case "/nozzle/calibrate":
                     return calibrateNozzleTip(body);
+                case "/nozzle/vacuum":
+                    return readNozzleVacuum(body);
                 case "/bedmap/scan":
                     return scanBedMap(body);
                 case "/bedmap/scan/cancel":
@@ -755,6 +757,78 @@ public class AiBridgeServer {
      * Body: {confirm, nozzleId (optional, default the selected nozzle)}
      */
     /**
+     * Reads a nozzle's vacuum sensor several times with its vacuum on, where the nozzle is, to
+     * see how far apart the readings with and without a part are (part on/off thresholds). The
+     * vacuum is turned off afterwards unless OpenPnP thinks the nozzle holds a part, so that a
+     * part is not dropped. Does not move the machine.
+     *
+     * Body: {nozzleId, samples (default 10), settleMs (default 500)}
+     */
+    private JsonObject readNozzleVacuum(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        String nozzleId = getString(body, "nozzleId");
+        Nozzle found = nozzleId == null ? null : findNozzle(machine, nozzleId);
+        if (!(found instanceof ReferenceNozzle)) {
+            throw new BadRequest("Give the nozzleId of a ReferenceNozzle.");
+        }
+        ReferenceNozzle nozzle = (ReferenceNozzle) found;
+        int samples = body.has("samples") ? body.get("samples")
+                                                .getAsInt()
+                : 10;
+        int settleMs = body.has("settleMs") ? body.get("settleMs")
+                                                  .getAsInt()
+                : 500;
+        if (samples < 1 || samples > 100) {
+            throw new BadRequest("samples must be 1 to 100.");
+        }
+        return runLogged("nozzle/vacuum", body, machine, () -> {
+            Actuator valve = nozzle.getExpectedVacuumActuator();
+            Actuator sensor = nozzle.getExpectedVacuumSenseActuator();
+            boolean holdsPart = nozzle.getPart() != null;
+            JsonArray raw = new JsonArray();
+            JsonArray values = new JsonArray();
+            double min = Double.MAX_VALUE;
+            double max = -Double.MAX_VALUE;
+            double sum = 0;
+            nozzle.getHead()
+                  .actuatePumpRequest(nozzle, true);
+            try {
+                valve.actuate(true);
+                Thread.sleep(settleMs);
+                for (int i = 0; i < samples; i++) {
+                    String text = sensor.read();
+                    raw.add(new JsonPrimitive(text));
+                    double value = Double.parseDouble(text.trim());
+                    values.add(new JsonPrimitive(value));
+                    min = Math.min(min, value);
+                    max = Math.max(max, value);
+                    sum += value;
+                }
+            }
+            finally {
+                if (!holdsPart) {
+                    valve.actuate(false);
+                    nozzle.getHead()
+                          .actuatePumpRequest(nozzle, false);
+                }
+            }
+            JsonObject o = ok();
+            o.addProperty("nozzleId", nozzle.getId());
+            o.addProperty("partOnNozzle", holdsPart ? nozzle.getPart()
+                                                            .getId()
+                    : null);
+            o.addProperty("vacuumLeftOn", holdsPart);
+            o.addProperty("mean", round(sum / samples));
+            o.addProperty("min", min);
+            o.addProperty("max", max);
+            o.add("values", values);
+            o.add("raw", raw);
+            return o;
+        });
+    }
+
+    /**
      * Runs the nozzle tip calibration of the nozzle's tip, like its Calibrate button: the bottom
      * camera finds the empty tip at several angles, and from that OpenPnP models the runout
      * (applied to every move while the tip is loaded) and, with the camera offset algorithms,
@@ -969,8 +1043,8 @@ public class AiBridgeServer {
         double drop = getDouble(body, "contactDrop", Double.NaN);
         Double contactDrop = Double.isNaN(drop) ? null : drop;
         boolean apply = getBoolean(body, "apply", false);
-        if (contactDrop != null && (contactDrop < 2 || contactDrop > 100)) {
-            throw new BadRequest("contactDrop must be between 2 and 100.");
+        if (contactDrop != null && (contactDrop < 2 || contactDrop > 2000)) {
+            throw new BadRequest("contactDrop must be between 2 and 2000.");
         }
         if (step < 0.01 || step > 0.2) {
             throw new BadRequest("step must be between 0.01 and 0.2 mm.");
@@ -1612,9 +1686,10 @@ public class AiBridgeServer {
 
     /**
      * The vacuum level at or below which the tip counts as sealed: contactDrop below the level
-     * in the air if given. Otherwise between the tip's part on and part off ranges, if they are
-     * set and the level in the air is in the part off range (on some machines they are unused
-     * defaults that do not fit the tip), else 10 below the level in the air.
+     * in the air if given. Otherwise the top of the tip's part on range if its part on check is
+     * in use and the level in the air is above it, or between the part on and part off ranges if
+     * those are set and the level in the air is in the part off range (on some machines they are
+     * unused defaults that do not fit the tip), else 10 below the level in the air.
      */
     private static double contactThreshold(ReferenceNozzleTip tip, double baseline,
             Double contactDrop) {
@@ -1624,7 +1699,11 @@ public class AiBridgeServer {
         double onHigh = tip.getVacuumLevelPartOnHigh();
         double offLow = tip.getVacuumLevelPartOffLow();
         double offHigh = tip.getVacuumLevelPartOffHigh();
-        if (onHigh > 0 && offLow > onHigh && baseline >= offLow && baseline <= offHigh) {
+        if (tip.getMethodPartOn() == ReferenceNozzleTip.VacuumMeasurementMethod.Absolute
+                && baseline > onHigh) {
+            return onHigh;
+        }
+        if (offLow > onHigh && baseline >= offLow && baseline <= offHigh) {
             return (onHigh + offLow) / 2;
         }
         return baseline - 10;
