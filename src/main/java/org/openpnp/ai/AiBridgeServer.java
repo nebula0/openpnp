@@ -85,6 +85,7 @@ import org.openpnp.model.LengthUnit;
 import org.openpnp.model.Location;
 import org.openpnp.model.Package;
 import org.openpnp.model.Part;
+import org.openpnp.model.PartSettingsHolder;
 import org.openpnp.model.Placement;
 import org.openpnp.model.PlacementsHolderLocation;
 import org.openpnp.spi.Actuator;
@@ -284,6 +285,8 @@ public class AiBridgeServer {
                     return getBedMapScanState();
                 case "/job/placements":
                     return getJobPlacements(query);
+                case "/parts":
+                    return getParts(query);
             }
         }
         else if (method.equals("POST")) {
@@ -315,6 +318,10 @@ public class AiBridgeServer {
                     return probeFeederZ(body);
                 case "/feeder/update":
                     return updateFeeder(body);
+                case "/part/update":
+                    return updatePart(body);
+                case "/package/update":
+                    return updatePackage(body);
                 case "/vision/bottom/test":
                     return testBottomVision(body);
                 case "/job/survey":
@@ -973,6 +980,225 @@ public class AiBridgeServer {
     }
 
     /**
+     * Lists parts with their height, package and the bottom vision settings they use.
+     *
+     * Query: ids (optional, comma separated part ids), package (optional, package id)
+     */
+    private JsonObject getParts(Map<String, String> query) {
+        Set<String> ids = new HashSet<>();
+        if (query.get("ids") != null) {
+            for (String id : query.get("ids")
+                                  .split(",")) {
+                ids.add(id.trim());
+            }
+        }
+        String packageId = query.get("package");
+        JsonArray parts = new JsonArray();
+        for (Part part : Configuration.get()
+                                      .getParts()) {
+            if ((!ids.isEmpty() && !ids.contains(part.getId())) || (packageId != null
+                    && (part.getPackage() == null || !packageId.equals(part.getPackage()
+                                                                       .getId())))) {
+                continue;
+            }
+            parts.add(partJson(part));
+        }
+        JsonObject o = ok();
+        o.add("parts", parts);
+        return o;
+    }
+
+    private JsonObject partJson(Part part) {
+        JsonObject p = new JsonObject();
+        p.addProperty("partId", part.getId());
+        p.addProperty("name", part.getName());
+        p.addProperty("height", round(part.getHeight()
+                                          .convertToUnits(LengthUnit.Millimeters)
+                                          .getValue()));
+        p.addProperty("packageId", part.getPackage() == null ? null
+                : part.getPackage()
+                      .getId());
+        p.addProperty("speed", part.getSpeed());
+        p.add("bottomVision", bottomVisionJson(part));
+        return p;
+    }
+
+    /**
+     * The bottom vision settings a part or package uses, whether they are its own or inherited,
+     * and their thresholds.
+     */
+    private static JsonObject bottomVisionJson(PartSettingsHolder holder) {
+        BottomVisionSettings settings =
+                ReferenceBottomVision.getDefault()
+                                     .getInheritedVisionSettings(holder);
+        JsonObject v = new JsonObject();
+        if (settings == null) {
+            return v;
+        }
+        v.addProperty("settingsId", settings.getId());
+        v.addProperty("settingsName", settings.getName());
+        v.addProperty("own", holder.getBottomVisionSettings() == settings);
+        v.add("thresholds", thresholdsOf(settings));
+        return v;
+    }
+
+    private static JsonArray thresholdsOf(BottomVisionSettings settings) {
+        JsonArray thresholds = new JsonArray();
+        for (CvStage stage : settings.getPipeline()
+                                     .getStages()) {
+            if (stage instanceof Threshold && stage.isEnabled()) {
+                thresholds.add(new JsonPrimitive(((Threshold) stage).getThreshold()));
+            }
+        }
+        return thresholds;
+    }
+
+    /**
+     * Sets a part's height, name (e.g. its manufacturer or LCSC part number) and/or bottom vision
+     * threshold. Does not move the machine.
+     *
+     * Body: {partId, height (mm), name, bottomVisionThreshold (0-255)}. With a threshold, the
+     * part gets settings of its own if it has none yet: a copy of those it inherits, named after
+     * the part, as the Specialize button in the GUI does. Then the threshold of all enabled
+     * Threshold stages of its pipeline is set.
+     */
+    private JsonObject updatePart(JsonObject body) throws Exception {
+        String partId = getString(body, "partId");
+        Part part = partId == null ? null
+                : Configuration.get()
+                               .getPart(partId);
+        if (part == null) {
+            throw new BadRequest("No part with id " + partId);
+        }
+        double height = getDouble(body, "height", Double.NaN);
+        if (!Double.isNaN(height) && (height < 0 || height > 30)) {
+            throw new BadRequest("height must be between 0 and 30 mm.");
+        }
+        String name = getString(body, "name");
+        int threshold = getThreshold(body);
+        if (Double.isNaN(height) && name == null && threshold < 0) {
+            throw new BadRequest("Give height, name and/or bottomVisionThreshold.");
+        }
+        JsonObject o = ok();
+        o.add("before", partJson(part));
+        onSwing(() -> {
+            if (!Double.isNaN(height)) {
+                part.setHeight(new Length(height, LengthUnit.Millimeters));
+            }
+            if (name != null) {
+                part.setName(name);
+            }
+            if (threshold >= 0) {
+                o.addProperty("createdSettings", setBottomVisionThreshold(part, threshold));
+            }
+            MainFrame.get()
+                     .getPartsTab()
+                     .repaint();
+            return null;
+        });
+        o.add("after", partJson(part));
+        logAction("part/update", body, o);
+        return o;
+    }
+
+    /**
+     * Sets the bottom vision threshold of a package, which its parts inherit unless they have
+     * settings of their own. Does not move the machine.
+     *
+     * Body: {packageId, bottomVisionThreshold (0-255)}. As for a part, the package gets settings
+     * of its own first if it shares them with others.
+     */
+    private JsonObject updatePackage(JsonObject body) throws Exception {
+        String packageId = getString(body, "packageId");
+        Package pkg = packageId == null ? null
+                : Configuration.get()
+                               .getPackage(packageId);
+        if (pkg == null) {
+            throw new BadRequest("No package with id " + packageId);
+        }
+        int threshold = getThreshold(body);
+        if (threshold < 0) {
+            throw new BadRequest("Give bottomVisionThreshold.");
+        }
+        JsonObject o = ok();
+        o.addProperty("packageId", pkg.getId());
+        o.add("bottomVisionBefore", bottomVisionJson(pkg));
+        onSwing(() -> {
+            o.addProperty("createdSettings", setBottomVisionThreshold(pkg, threshold));
+            return null;
+        });
+        o.add("bottomVision", bottomVisionJson(pkg));
+        JsonArray inheriting = new JsonArray();
+        for (Part part : Configuration.get()
+                                      .getParts()) {
+            if (part.getPackage() == pkg && part.getBottomVisionSettings() == null) {
+                inheriting.add(new JsonPrimitive(part.getId()));
+            }
+        }
+        o.add("partsInheriting", inheriting);
+        logAction("package/update", body, o);
+        return o;
+    }
+
+    /**
+     * @return the bottomVisionThreshold of the body, or -1 if none is given.
+     */
+    private static int getThreshold(JsonObject body) throws BadRequest {
+        double threshold = getDouble(body, "bottomVisionThreshold", Double.NaN);
+        if (Double.isNaN(threshold)) {
+            return -1;
+        }
+        if (threshold < 0 || threshold > 255 || threshold != Math.rint(threshold)) {
+            throw new BadRequest("bottomVisionThreshold must be a whole number from 0 to 255.");
+        }
+        return (int) threshold;
+    }
+
+    /**
+     * Sets the threshold of the enabled Threshold stages in the bottom vision settings of a part
+     * or package. If the holder has no settings of its own, or shares them with others, it first
+     * gets a copy of the settings it uses, so that nothing else changes.
+     *
+     * @return whether new settings were created.
+     */
+    private static boolean setBottomVisionThreshold(PartSettingsHolder holder, int threshold)
+            throws Exception {
+        BottomVisionSettings settings =
+                ReferenceBottomVision.getDefault()
+                                     .getInheritedVisionSettings(holder);
+        if (settings == null) {
+            throw new Exception("No bottom vision settings found for " + holder.getId());
+        }
+        List<PartSettingsHolder> users = settings.getUsedBottomVisionIn();
+        boolean create = holder.getBottomVisionSettings() != settings || users.size() != 1
+                || users.get(0) != holder;
+        if (create) {
+            BottomVisionSettings own = new BottomVisionSettings();
+            own.setValues(settings);
+            own.setName(holder.getShortName());
+            holder.setBottomVisionSettings(own);
+            Configuration.get()
+                         .addVisionSettings(own);
+            settings = own;
+        }
+        boolean found = false;
+        for (CvStage stage : settings.getPipeline()
+                                     .getStages()) {
+            if (stage instanceof Threshold && stage.isEnabled()) {
+                ((Threshold) stage).setThreshold(threshold);
+                found = true;
+            }
+        }
+        if (!found) {
+            throw new Exception("The bottom vision pipeline \"" + settings.getName()
+                    + "\" has no enabled Threshold stage.");
+        }
+        Configuration.get()
+                     .fireVisionSettingsChanged();
+        return create;
+    }
+
+    /**
      * Runs the bottom vision of the part on a nozzle once, as the job processor would, but
      * without placing: the nozzle goes over the bottom camera and the part's vision pipeline is
      * processed. Returns what was found and the images of the pipeline, also when nothing was
@@ -1485,6 +1711,13 @@ public class AiBridgeServer {
                         placement.getPart() == null ? null
                                 : placement.getPart()
                                            .getId());
+                if (placement.getPart() != null) {
+                    p.addProperty("partHeight", round(placement.getPart()
+                                                               .getHeight()
+                                                               .convertToUnits(
+                                                                       LengthUnit.Millimeters)
+                                                               .getValue()));
+                }
                 p.addProperty("enabled", placement.isEnabled());
                 p.addProperty("side", placement.getSide()
                                                .toString());

@@ -413,6 +413,45 @@ def update_feeder(
 
 
 @mcp.tool()
+def list_parts(ids: str | None = None, package: str | None = None) -> str:
+    """List parts with their name, height (mm), package and the bottom vision settings they use
+    (own or inherited, with thresholds). ids: comma separated part ids; package: a package id.
+    Without filters all parts are listed."""
+    return json.dumps(_call("GET", "/parts", {"ids": ids, "package": package}),
+                      ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def update_part(
+    part_id: str,
+    reason: str,
+    height: float | None = None,
+    name: str | None = None,
+    bottom_vision_threshold: int | None = None,
+) -> str:
+    """Set a part's height (mm, top of the part above the board), name (e.g. its manufacturer or
+    LCSC part number) and/or bottom vision threshold. Does not move the machine.
+
+    With a threshold the part gets bottom vision settings of its own, a copy of those it
+    inherits (usually its package's), if it has none yet; its package and other parts keep
+    theirs. Find the threshold with test_bottom_vision(threshold=...) first. The result shows
+    the values before and after."""
+    body = {"partId": part_id, "height": height, "name": name,
+            "bottomVisionThreshold": bottom_vision_threshold, "reason": reason}
+    return json.dumps(_call("POST", "/part/update", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def update_package(package_id: str, bottom_vision_threshold: int, reason: str) -> str:
+    """Set the bottom vision threshold of a package, used by its parts that have no settings
+    of their own (partsInheriting in the result). If the package shares its settings with
+    others, it gets a copy of its own first. Does not move the machine."""
+    body = {"packageId": package_id, "bottomVisionThreshold": bottom_vision_threshold,
+            "reason": reason}
+    return json.dumps(_call("POST", "/package/update", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
 def scan_qr_feeders(
     y: float,
     x_from: float,
