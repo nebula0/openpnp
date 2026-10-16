@@ -115,6 +115,8 @@ def save_images(result, directory):
 
 
 def main():
+    # Board ids contain '⇒', which a Windows console code page (e.g. cp950) cannot print.
+    sys.stdout.reconfigure(errors='replace')
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--job', required=True, help='the .job.xml file')
     parser.add_argument('--boards', help='comma separated board ids, e.g. Brd1,Brd3 '

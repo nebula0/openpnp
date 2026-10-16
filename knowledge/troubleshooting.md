@@ -18,6 +18,14 @@
 - 原因：Threshold 太低，吸嘴頭邊緣的反光被一起框進去。**同封裝的不同零件也會不同**：10/16 1uF 用 180 正常，100 nF、10 nF 在 180 都框到反光，要 200 以上。
 - 先試：用 `test_bottom_vision(threshold=…)` 往上掃，直到二值化影像只剩零件、大小接近 footprint。取可用範圍中間值，用 `update_package` 或 `update_part(bottom_vision_threshold=…)` 寫入（後者會自動給零件一份專用設定，不影響其他零件）。
 
+### `Part ... width too large: nominal ..., limit ..., measured ...`，連續好幾顆都是，之前同樣的門檻是好的
+- 原因（10/16）：**相機曝光變了**，整張畫面變亮，吸嘴口外圈的反光超過門檻、被一起框進去（量到 2.4–3.6 mm）。那次是電腦斷電重開機之後，相機改用設定檔裡的 Exposure −1（最長）。零件其實好好地吸在吸嘴中間，照片裡那條小亮條就是零件（兩個端子），只是比反光圈小很多。
+- 先試：
+  1. `camera_properties("Bottom")` 和 `camera_properties("Top")` 看 Exposure 和 `freeze`。驗證過的值：Top −4、Bottom −5、freeze true（見 known-good）。
+  2. 不對就用 `camera_properties(..., set={"Exposure": {"auto": false, "value": -5}}, freeze=true)` 改回來，再跑 `tune_bottom_vision.py` 確認範圍（C0603 100nF 在 −5 時是 210–250）。
+  3. 上相機的驗收照片偏白、量到的零件寬度偏大或角度很怪，也是同一個原因。
+- 注意：不要先懷疑真空或補光燈。先拿同一個步驟以前正常的照片來比亮度。
+
 ### 底部視覺 `found`，但吸嘴上其實沒有零件
 - 原因：沒吸到（例如口袋是空的），而門檻夠低時吸嘴口的反光會被框成一個「零件」（10/16：1.10 × 1.87 mm、−5.9°）。這台沒開吸取後的真空檢查，所以 OpenPnP 也以為有吸到。
 - 先試：看底部相機的原始影像，吸嘴口中間有沒有零件；量到的大小和 footprint 差很多時就要懷疑。再到取料位置拍照，看口袋是不是空的。用 `discard_part` 清掉 OpenPnP 記錄的零件狀態。
@@ -133,8 +141,8 @@
 - 先試：把零件推回格子中間，再用 `update_feeder` 重新啟用。
 
 ### OpenPnP 關不掉（log 有 `Shutting down...`，但程序沒有結束）
-- 原因：還沒查到。`quit()` 中途丟出例外，所以沒有呼叫到 `System.exit`。
-- 先試：看 `<configDir>/log/stderr.log`。等 90 秒還沒結束就強制結束；設定通常已經存好了。
+- 原因（10/16 查到）：**OpenPnP 在跑的時候重新建置了 jar**。關閉時要載入還沒用過的 class，jar 已經被換掉，`stderr.log` 出現 `NoClassDefFoundError thrown from the UncaughtExceptionHandler in thread "AWT-EventQueue-0"`，`quit()` 卡在中途，沒有呼叫到 `System.exit`。
+- 先試：強制結束（設定可能沒存，先看 `~/.openpnp2` 的 `git status`）。以後要先關閉 OpenPnP，再 `mvn package`。
 
 ### 重啟後 Job 分頁是空的
 - 原因：`auto-load-most-recent-job` 是 false。

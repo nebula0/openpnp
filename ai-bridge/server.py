@@ -156,6 +156,37 @@ def discard_part(reason: str, confirm: bool = False, nozzle_id: str | None = Non
     return json.dumps(_call("POST", "/nozzle/discard", body=body), ensure_ascii=False, indent=1)
 
 
+@mcp.tool()
+def camera_properties(camera: str, reason: str, set: dict | None = None,
+                      freeze: bool | None = None) -> str:
+    """Read, and optionally change, a USB camera's device properties (Exposure, Gain,
+    Brightness, ...: value, min, max, default, auto), then take one frame and report its mean
+    gray level (meanGray, frameFile) to compare settings. Does not move the machine.
+
+    set: e.g. {"Exposure": {"auto": false, "value": -5}}. freeze=true makes OpenPnP apply the
+    stored values every time the camera opens instead of saving what the device reports (a
+    camera that lost its settings after a power cycle then gets them back). Saved when
+    OpenPnP closes.
+    """
+    body = {"camera": camera, "set": set, "freeze": freeze, "reason": reason}
+    return json.dumps(_call("POST", "/camera/properties", body=body), ensure_ascii=False, indent=1)
+
+
+@mcp.tool()
+def calibrate_nozzle_tip(reason: str, confirm: bool = False, nozzle_id: str | None = None) -> str:
+    """Calibrate the nozzle tip on a nozzle, like its Calibrate button in OpenPnP.
+
+    The bottom camera finds the empty tip at several angles. OpenPnP models the runout
+    (applied to every move) and where the nozzle axis really is in the bottom camera
+    (bottomCameraOffset, applied to bottom vision). Kept in memory until the next restart.
+    The nozzle must be empty. MOVES THE MACHINE: first call without confirm to get the plan,
+    ask the user, and only then call again with confirm=true. nozzle_id defaults to the
+    nozzle selected in the GUI.
+    """
+    body = {"confirm": confirm, "nozzleId": nozzle_id, "reason": reason}
+    return json.dumps(_call("POST", "/nozzle/calibrate", body=body), ensure_ascii=False, indent=1)
+
+
 def _region(x_min, y_min, x_max, y_max):
     values = (x_min, y_min, x_max, y_max)
     if all(v is None for v in values):

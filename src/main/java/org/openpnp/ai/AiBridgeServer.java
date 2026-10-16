@@ -76,6 +76,8 @@ import org.openpnp.gui.FeedersPanel;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.machine.reference.ReferenceNozzle;
 import org.openpnp.machine.reference.ReferenceNozzleTip;
+import org.openpnp.machine.reference.ReferenceNozzleTipCalibration;
+import org.openpnp.machine.reference.camera.OpenPnpCaptureCamera;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
 import org.openpnp.machine.reference.vision.ReferenceBottomVision;
@@ -305,6 +307,8 @@ public class AiBridgeServer {
                     return homeMachine(body);
                 case "/nozzle/discard":
                     return discardPart(body);
+                case "/nozzle/calibrate":
+                    return calibrateNozzleTip(body);
                 case "/bedmap/scan":
                     return scanBedMap(body);
                 case "/bedmap/scan/cancel":
@@ -319,6 +323,8 @@ public class AiBridgeServer {
                     return setupStripFeeder(body);
                 case "/camera/move":
                     return moveCamera(body);
+                case "/camera/properties":
+                    return cameraProperties(body);
                 case "/feeder/probe-z":
                     return probeFeederZ(body);
                 case "/feeder/update":
@@ -748,6 +754,85 @@ public class AiBridgeServer {
      *
      * Body: {confirm, nozzleId (optional, default the selected nozzle)}
      */
+    /**
+     * Runs the nozzle tip calibration of the nozzle's tip, like its Calibrate button: the bottom
+     * camera finds the empty tip at several angles, and from that OpenPnP models the runout
+     * (applied to every move while the tip is loaded) and, with the camera offset algorithms,
+     * where the nozzle axis really is in the bottom camera (applied to bottom vision). The
+     * result is kept in memory only, until the next calibration or restart.
+     *
+     * Body: {confirm, nozzleId (optional, default the selected nozzle)}
+     */
+    private JsonObject calibrateNozzleTip(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Nozzle nozzle;
+        String nozzleId = getString(body, "nozzleId");
+        if (nozzleId != null) {
+            nozzle = findNozzle(machine, nozzleId);
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle with id " + nozzleId);
+            }
+        }
+        else {
+            nozzle = onSwing(() -> MainFrame.get()
+                                            .getMachineControls()
+                                            .getSelectedNozzle());
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle is selected, give nozzleId.");
+            }
+        }
+        if (!(nozzle instanceof ReferenceNozzle)
+                || !(nozzle.getNozzleTip() instanceof ReferenceNozzleTip)) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " has no nozzle tip to calibrate.");
+        }
+        ReferenceNozzle referenceNozzle = (ReferenceNozzle) nozzle;
+        ReferenceNozzleTip tip = (ReferenceNozzleTip) nozzle.getNozzleTip();
+        ReferenceNozzleTipCalibration calibration = tip.getCalibration();
+        if (!calibration.isEnabled()) {
+            throw new BadRequest("Calibration is disabled for nozzle tip " + tip.getName() + ".");
+        }
+        if (nozzle.getPart() != null) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " holds " + nozzle.getPart()
+                                                                                   .getId()
+                    + ": discard it first.");
+        }
+        Camera bottom = VisionUtils.getBottomVisionCamera();
+        JsonObject gate = gateMotion(machine, body,
+                "Move nozzle " + nozzle.getName() + " with tip " + tip.getName()
+                        + " over the bottom camera " + bottom.getName() + " and turn it in "
+                        + calibration.getAngleSubdivisions()
+                        + " steps to calibrate the tip.");
+        if (gate != null) {
+            return gate;
+        }
+        return runLogged("nozzle/calibrate", body, machine, () -> {
+            calibration.calibrate(referenceNozzle);
+            JsonObject o = ok();
+            o.addProperty("nozzleId", nozzle.getId());
+            o.addProperty("nozzleTip", tip.getName());
+            o.addProperty("algorithm", calibration.getRunoutCompensationAlgorithm()
+                                                  .toString());
+            o.addProperty("calibrated", calibration.isCalibrated(referenceNozzle));
+            o.addProperty("information", calibration.getCalibrationInformation(referenceNozzle));
+            o.add("bottomCameraOffset", toJson(calibration
+                                                          .getCalibratedCameraOffset(referenceNozzle,
+                                                                  bottom)
+                                                          .convertToUnits(LengthUnit.Millimeters)));
+            JsonObject runout = new JsonObject();
+            for (int angle = 0; angle < 360; angle += 90) {
+                runout.add(Integer.toString(angle), toJson(calibration
+                                                                      .getCalibratedOffset(
+                                                                              referenceNozzle,
+                                                                              angle)
+                                                                      .convertToUnits(
+                                                                              LengthUnit.Millimeters)));
+            }
+            o.add("runoutOffsetByAngle", runout);
+            return o;
+        });
+    }
+
     private JsonObject discardPart(JsonObject body) throws Exception {
         Machine machine = Configuration.get()
                                        .getMachine();
@@ -1613,6 +1698,117 @@ public class AiBridgeServer {
             }
         }
         return feeder.getPickLocation();
+    }
+
+    /**
+     * Reads, and optionally changes, the device properties (exposure, gain, ...) of an
+     * OpenPnpCaptureCamera, then takes one frame where the camera is and reports its mean gray
+     * level, to compare settings. With freeze, the stored values are applied every time the
+     * camera opens and are no longer replaced by what the device reports; without it, a camera
+     * that lost its settings (e.g. after a power cycle) is read back and saved as it is.
+     * Does not move the machine.
+     *
+     * Body: {camera (name or id), set: {Exposure: {value, auto}, ...} (optional), freeze
+     * (optional)}
+     */
+    private JsonObject cameraProperties(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        String name = getString(body, "camera");
+        OpenPnpCaptureCamera camera = null;
+        for (Camera c : machine.getAllCameras()) {
+            if (c instanceof OpenPnpCaptureCamera
+                    && (c.getName()
+                         .equals(name)
+                            || c.getId()
+                                .equals(name))) {
+                camera = (OpenPnpCaptureCamera) c;
+            }
+        }
+        if (camera == null) {
+            throw new BadRequest("No OpenPnpCaptureCamera named " + name + ".");
+        }
+        Map<String, OpenPnpCaptureCamera.CapturePropertyHolder> holders = new LinkedHashMap<>();
+        holders.put("BackLightCompensation", camera.getBackLightCompensation());
+        holders.put("Brightness", camera.getBrightness());
+        holders.put("Contrast", camera.getContrast());
+        holders.put("Exposure", camera.getExposure());
+        holders.put("Focus", camera.getFocus());
+        holders.put("Gain", camera.getGain());
+        holders.put("Gamma", camera.getGamma());
+        holders.put("Hue", camera.getHue());
+        holders.put("PowerLineFrequency", camera.getPowerLineFrequency());
+        holders.put("Saturation", camera.getSaturation());
+        holders.put("Sharpness", camera.getSharpness());
+        holders.put("WhiteBalance", camera.getWhiteBalance());
+        holders.put("Zoom", camera.getZoom());
+
+        JsonObject set = body.has("set") && body.get("set")
+                                                .isJsonObject() ? body.getAsJsonObject("set")
+                                                        : new JsonObject();
+        for (Map.Entry<String, JsonElement> setEntry : set.entrySet()) {
+            String key = setEntry.getKey();
+            if (!holders.containsKey(key)) {
+                throw new BadRequest("No camera property " + key + ", use one of "
+                        + holders.keySet() + ".");
+            }
+        }
+        OpenPnpCaptureCamera target = camera;
+        return runLogged("camera/properties", body, machine, () -> {
+            if (body.has("freeze") && !body.get("freeze")
+                                           .isJsonNull()) {
+                target.setFreezeProperties(body.get("freeze")
+                                               .getAsBoolean());
+            }
+            for (Map.Entry<String, JsonElement> setEntry : set.entrySet()) {
+                String key = setEntry.getKey();
+                JsonObject change = set.getAsJsonObject(key);
+                OpenPnpCaptureCamera.CapturePropertyHolder holder = holders.get(key);
+                // Auto first: a manual value is ignored while auto is on.
+                if (change.has("auto")) {
+                    holder.setAuto(change.get("auto")
+                                         .getAsBoolean());
+                }
+                if (change.has("value")) {
+                    holder.setValue(change.get("value")
+                                          .getAsInt());
+                }
+            }
+            JsonObject properties = new JsonObject();
+            for (Map.Entry<String, OpenPnpCaptureCamera.CapturePropertyHolder> entry : holders
+                                                                                              .entrySet()) {
+                OpenPnpCaptureCamera.CapturePropertyHolder holder = entry.getValue();
+                JsonObject p = new JsonObject();
+                p.addProperty("supported", holder.isSupported());
+                if (holder.isSupported()) {
+                    p.addProperty("value", holder.getValue());
+                    p.addProperty("min", holder.getMin());
+                    p.addProperty("max", holder.getMax());
+                    p.addProperty("default", holder.getDefault());
+                    if (holder.isAutoSupported()) {
+                        p.addProperty("auto", holder.isAuto());
+                    }
+                }
+                properties.add(entry.getKey(), p);
+            }
+            BufferedImage frame = target.lightSettleAndCapture();
+            Mat gray = toGrayFloat(frame);
+            double mean = org.opencv.core.Core.mean(gray).val[0];
+            gray.release();
+            File captures = new File(bridgeDirectory, "captures");
+            captures.mkdirs();
+            File file = new File(captures, new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date())
+                    + "-" + target.getName() + "-properties.png");
+            ImageIO.write(frame, "png", file);
+
+            JsonObject o = ok();
+            o.addProperty("camera", target.getName());
+            o.addProperty("freeze", target.isFreezeProperties());
+            o.add("properties", properties);
+            o.addProperty("meanGray", round(mean));
+            o.addProperty("frameFile", file.getAbsolutePath());
+            return o;
+        });
     }
 
     /**
