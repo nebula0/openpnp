@@ -78,6 +78,17 @@ public class StripTapeLocator {
     }
 
     /**
+     * The strip was found, but no hole beyond the first part's reference hole is in view, often
+     * because it is cut off at the edge of the image. Moving the camera half a hole pitch along
+     * the feed direction brings it into view.
+     */
+    public static class NoHoleBeyondFirstPartException extends Exception {
+        public NoHoleBeyondFirstPartException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Converts image pixels to machine millimeters.
      */
     public interface PixelToMachine {
@@ -143,8 +154,9 @@ public class StripTapeLocator {
         }
         r.lastHole = r.holes.get(r.holes.size() - 1);
         if (dot(d, sub(r.lastHole, r.referenceHole)) < HOLE_PITCH / 2) {
-            throw new Exception("The first part is at the far end of the holes in view. Move the "
-                    + "camera so that at least one more hole beyond the first part is visible.");
+            throw new NoHoleBeyondFirstPartException("The first part is at the far end of the "
+                    + "holes in view. Move the camera so that at least one more hole beyond the "
+                    + "first part is visible.");
         }
 
         r.partPitch = HOLE_PITCH;

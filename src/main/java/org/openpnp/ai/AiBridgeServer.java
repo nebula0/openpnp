@@ -2406,22 +2406,34 @@ public class AiBridgeServer {
                 String why = null;
                 double searched = 0;
                 double direction = Math.signum(tapeOffset);
-                for (double d = 0; d <= searchLength; d += 8) {
-                    MovableUtils.moveToLocationAtSafeZ(camera,
-                            camera.getLocation()
-                                  .convertToUnits(LengthUnit.Millimeters)
-                                  .derive(f[0], f[1] + tapeOffset + direction * d, null, null));
-                    searched = d;
-                    try {
-                        StripTapeLocator.Result t = locateStripNear(camera, f[0], z, tapeWidth);
-                        if (!t.parts.isEmpty()) {
-                            tape = t;
+                // Photos 8 mm apart, i.e. two hole pitches, put the holes at the same place in
+                // each photo. If the hole beyond the first part is cut off at the edge of one,
+                // it would be in all of them, so then look again half a pitch further on.
+                search: for (double d = 0; d <= searchLength; d += 8) {
+                    for (double nudge : new double[] {0, StripTapeLocator.HOLE_PITCH / 2}) {
+                        MovableUtils.moveToLocationAtSafeZ(camera,
+                                camera.getLocation()
+                                      .convertToUnits(LengthUnit.Millimeters)
+                                      .derive(f[0], f[1] + tapeOffset + direction * (d + nudge),
+                                              null, null));
+                        searched = d + nudge;
+                        try {
+                            StripTapeLocator.Result t =
+                                    locateStripNear(camera, f[0], z, tapeWidth);
+                            if (!t.parts.isEmpty()) {
+                                tape = t;
+                                break search;
+                            }
+                            why = "holes but no parts (used pockets)";
                             break;
                         }
-                        why = "holes but no parts (used pockets)";
-                    }
-                    catch (Exception e) {
-                        why = describe(e);
+                        catch (StripTapeLocator.NoHoleBeyondFirstPartException e) {
+                            why = describe(e);
+                        }
+                        catch (Exception e) {
+                            why = describe(e);
+                            break;
+                        }
                     }
                 }
                 if (tape == null) {
