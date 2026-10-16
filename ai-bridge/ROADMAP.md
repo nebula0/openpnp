@@ -53,7 +53,7 @@
 |---|---|---|---|---|
 | footprint、相容吸嘴頭 | P | 👤／🤖（照抄類似封裝） | 改 `packages.xml` | C0603、SOP-16 |
 | 零件高度、說明（料號） | 每個零件一次 | ✅ API；👤 查厚度 | `list_parts`、`update_part(height, name)`；`/job/placements` 也回傳高度 | 真機（10/16） |
-| **底部視覺門檻** | P（同封裝的零件也可能不同） | ✅ 量測、寫入；**🤖 選門檻** | `test_bottom_vision(threshold=…)` 掃描 → `update_package` 或 `update_part(bottom_vision_threshold)`（自動建立專用設定） | C0603（含 1uF）215 + 大小檢查 25% |
+| **底部視覺門檻** | P（同封裝的零件也可能不同） | ✅ 腳本 `tune_bottom_vision.py`；結果不明確才 🤖 | `test_bottom_vision(threshold=…)` 掃描 → `update_package` 或 `update_part(bottom_vision_threshold)`（自動建立專用設定） | C0603（含 1uF）215 + 大小檢查 25% |
 
 ### 2.3 料帶與 feeder（R）
 
@@ -182,7 +182,7 @@
    - 依零件高度排序，**先放矮的，再放高的**（用零件的 `height`，所以要先補齊高度是 0 的零件）。
    - 放料，再驗收（`inspect_placements`，預設只回傳不合格的照片）。
    - 輸出一份報告：每個 placement 的判定、不合格的照片路徑、被停用的 feeder、用掉的零件數。
-2. **`tune_bottom_vision.py`**：把今天手動調門檻的方法寫成腳本。從高到低掃一遍門檻，找出「量到的大小接近 footprint、角度穩定」的範圍，取中間值，有需要時再建立該封裝的視覺設定。結果不確定時（例如找不到可用範圍）才交給 AI。
+2. ✅ **`tune_bottom_vision.py`**（10/16，真機 10nF：170/180 被大小檢查擋、190–250 通過、選 220、−90° ok）：把今天手動調門檻的方法寫成腳本。通過＝找到 + 大小檢查 ok + 角度離中位數 2° 內；取最長連續範圍的中間值，`--apply` 寫入零件或封裝（`--package`）。原本的說明：從高到低掃一遍門檻，找出「量到的大小接近 footprint、角度穩定」的範圍，取中間值，有需要時再建立該封裝的視覺設定。結果不確定時（例如找不到可用範圍）才交給 AI。
 3. ✅ **`scan_feeders.py --verify`**（10/16）：新增的 feeder 接著自動量 Z（接觸 −0.1）、試吸、底部視覺（含大小檢查）、拋掉，全部通過才啟用；`--verify-all` 連更新的也驗。真機：100nF、10nF 通過；1uF 因為上膜沒撕完被抓到。待加：認出上膜（反光），掃描時就略過。
 4. **所有腳本統一的失敗回報格式**：寫到 `ai-bridge/reports/<時間>.json`，內容包括哪一步失敗、錯誤訊息、照片路徑、機器和吸嘴的狀態。AI 接手時從這裡讀。
 
