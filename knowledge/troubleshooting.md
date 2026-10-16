@@ -54,11 +54,12 @@
 
 ### 第一顆離標籤很遠，中間明明有零件（10/16，100 nF 從 Y 184.9 跳到 144.7）
 - 原因：照片每次走 8 mm（兩個孔距），孔在每張照片裡的位置都一樣。第一顆零件後面那個孔剛好被畫面邊緣切掉時，每張都會以 `The first part is at the far end of the holes in view` 失敗。
-- 已修正：遇到這種失敗時，相機會沿料帶多走 2 mm 再拍一次。照片在 `scan/`；要離線重跑定位，可以寫一個小程式呼叫 `StripTapeLocator.locate`（classpath：`target/classes` 和 `~/.m2/.../opencv-4.5.5-1.jar`，記得先呼叫 `nu.pattern.OpenCV.loadLocally()`）。
+- 已修正：遇到這種失敗時，相機會沿料帶多走 2 mm、4 mm 再拍（只走 2 mm 不夠時 10 nF 跳過了一顆）。照片在 `scan/`；要離線重跑定位，可以寫一個小程式呼叫 `StripTapeLocator.locate`（classpath：`target/classes` 和 `~/.m2/.../opencv-4.5.5-1.jar`，記得先呼叫 `nu.pattern.OpenCV.loadLocally()`）。
 
 ### 掃描回報有零件，但吸不到（空口袋被當成零件）
 - 原因：`StripTapeLocator.findBlobs` 只找比紙帶暗的長方形，空口袋（看到底下的檯面）也符合。10/16 1uF 料帶靠標籤那段全是空口袋，掃描還是回報 partsFound 2。
-- 先試：看 `scan/` 的照片，零件兩端應該有很亮的端子；沒有就是空的。把料帶剪掉空的那段或補料後重掃。程式還沒修，見 ROADMAP 4.5。
+- 已修正（10/16）：零件內部要有至少 2% 的像素接近紙帶亮度（端子），空口袋是 0%，會被略過。若之後有端子不亮的零件被略過，調 `StripTapeLocator.MIN_BRIGHT_FRACTION`。
+- 先試：看 `scan/` 的照片，零件兩端應該有很亮的端子；沒有就是空的。
 
 ### `scan_qr_feeders` 往標籤上方（+Y）找料帶
 - 原因：MCP server 還在跑舊版，`tape_offset` 的預設值是 +15（`server.py` 已經改成 −14）。

@@ -53,7 +53,7 @@
 |---|---|---|---|---|
 | footprint、相容吸嘴頭 | P | 👤／🤖（照抄類似封裝） | 改 `packages.xml` | C0603、SOP-16 |
 | 零件高度、說明（料號） | 每個零件一次 | ✅ API；👤 查厚度 | `list_parts`、`update_part(height, name)`；`/job/placements` 也回傳高度 | 真機（10/16） |
-| **底部視覺門檻** | P（同封裝的零件也可能不同） | ✅ 量測、寫入；**🤖 選門檻** | `test_bottom_vision(threshold=…)` 掃描 → `update_package` 或 `update_part(bottom_vision_threshold)`（自動建立專用設定） | C0603 215、C0603-1uF 180 |
+| **底部視覺門檻** | P（同封裝的零件也可能不同） | ✅ 量測、寫入；**🤖 選門檻** | `test_bottom_vision(threshold=…)` 掃描 → `update_package` 或 `update_part(bottom_vision_threshold)`（自動建立專用設定） | C0603（含 1uF）215 + 大小檢查 25% |
 
 ### 2.3 料帶與 feeder（R）
 
@@ -230,8 +230,8 @@
 - 角度量測做更細的擬合（目前 BodyLocator 以 0.5° 為一階）。
 - 補齊零件高度：C0603-1uF、-10nF、-100nF 已設（0.8）；C0603-18nF、-100pF 和多數 R0603 還是 0。
 - `lookup_parts.py`：從零件說明裡的 LCSC／製造商料號查規格，填入高度和說明（`update_part`）。LCSC 常常沒寫厚度（例如 FOJAN 10 nF），查不到的列出來交給 AI 找規格書或由人量。
-- **QR 掃描會把空口袋當成零件**（10/16，1uF 料帶靠標籤那段全空，掃描仍回報 partsFound 2）：`StripTapeLocator.findBlobs` 只找比紙帶暗的長方形；要再檢查兩端有沒有亮的端子。
-- **吸嘴是空的時，底部視覺仍可能「找到」零件**（10/16，1uF 設定門檻 180 框到吸嘴口反光，1.10 × 1.87 mm）：在視覺設定開啟零件大小檢查（Check Part Size），或在吸取後開真空檢查，否則 job 可能放「空氣」。
+- ~~QR 掃描會把空口袋當成零件~~：10/16 已修（要有亮的端子）。
+- 吸嘴是空的時，底部視覺可能框到吸嘴口反光：10/16 C0603 已開啟零件大小檢查（BodySize 25%，`update_package`／`update_part` 可設）。其他封裝（SOP-16、R0603）還沒開；吸取後的真空檢查也還沒開。
 - R0603 的底部視覺（現在用的是預設門檻 240，很可能也找不到零件）。
 - 如果之後要用 0805，要另外建封裝和視覺設定。
 - 部分 AD608 feeder 之前被 job processor 自動停用，要記得重新啟用。
