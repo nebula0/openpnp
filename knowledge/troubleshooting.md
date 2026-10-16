@@ -14,8 +14,16 @@
 - 相關：`test_bottom_vision`、`pick_from_feeder`、`discard_part`。2026-10-14。
 
 ### 底部視覺框到的範圍太大、角度錯很多（例如 −33°）
-- 原因：Threshold 太低，吸嘴頭邊緣的反光被一起框進去。
-- 先試：把門檻調高，直到二值化影像裡吸嘴頭的反光消失。
+- 原因：Threshold 太低，吸嘴頭邊緣的反光被一起框進去。**同封裝的不同零件也會不同**：10/16 1uF 用 180 正常，100 nF、10 nF 在 180 都框到反光，要 200 以上。
+- 先試：用 `test_bottom_vision(threshold=…)` 往上掃，直到二值化影像只剩零件、大小接近 footprint。取可用範圍中間值，用 `update_package` 或 `update_part(bottom_vision_threshold=…)` 寫入（後者會自動給零件一份專用設定，不影響其他零件）。
+
+### 底部視覺 `found`，但吸嘴上其實沒有零件
+- 原因：沒吸到（例如口袋是空的），而門檻夠低時吸嘴口的反光會被框成一個「零件」（10/16：1.10 × 1.87 mm、−5.9°）。這台沒開吸取後的真空檢查，所以 OpenPnP 也以為有吸到。
+- 先試：看底部相機的原始影像，吸嘴口中間有沒有零件；量到的大小和 footprint 差很多時就要懷疑。再到取料位置拍照，看口袋是不是空的。用 `discard_part` 清掉 OpenPnP 記錄的零件狀態。
+
+### `test_bottom_vision`：`Part height unknown and camera Bottom does not support part height sensing`
+- 原因：零件高度是 0。
+- 先試：查規格書的厚度，用 `update_part(height=…)` 填入（0603 厚度會因容值、耐壓不同，不要一律套 0.8）。
 
 ### `pick offset ... > Max. Pick Tolerance`，零件被拋掉
 - 原因：吸偏了，或是吸到的不是正確的零件（10/13 是使用者故意放的假 IC）。
@@ -43,6 +51,18 @@
 ### `No parts found on the strip within ... mm of the label`
 - 原因：靠近標籤的口袋都用掉了，空的；或者料帶比 `search_length` 還短。
 - 先試：加大 `search_length`，或確認料帶上還有零件。
+
+### 第一顆離標籤很遠，中間明明有零件（10/16，100 nF 從 Y 184.9 跳到 144.7）
+- 原因：照片每次走 8 mm（兩個孔距），孔在每張照片裡的位置都一樣。第一顆零件後面那個孔剛好被畫面邊緣切掉時，每張都會以 `The first part is at the far end of the holes in view` 失敗。
+- 已修正：遇到這種失敗時，相機會沿料帶多走 2 mm 再拍一次。照片在 `scan/`；要離線重跑定位，可以寫一個小程式呼叫 `StripTapeLocator.locate`（classpath：`target/classes` 和 `~/.m2/.../opencv-4.5.5-1.jar`，記得先呼叫 `nu.pattern.OpenCV.loadLocally()`）。
+
+### 掃描回報有零件，但吸不到（空口袋被當成零件）
+- 原因：`StripTapeLocator.findBlobs` 只找比紙帶暗的長方形，空口袋（看到底下的檯面）也符合。10/16 1uF 料帶靠標籤那段全是空口袋，掃描還是回報 partsFound 2。
+- 先試：看 `scan/` 的照片，零件兩端應該有很亮的端子；沒有就是空的。把料帶剪掉空的那段或補料後重掃。程式還沒修，見 ROADMAP 4.5。
+
+### `scan_qr_feeders` 往標籤上方（+Y）找料帶
+- 原因：MCP server 還在跑舊版，`tape_offset` 的預設值是 +15（`server.py` 已經改成 −14）。
+- 先試：明確傳 `tape_offset=-14`，或請使用者打 `/mcp` 重新連線。
 
 ### `The strip feeds towards its label`
 - 原因：料帶放反了（定位孔在零件的另一側）。
