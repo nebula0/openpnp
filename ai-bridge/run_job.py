@@ -11,8 +11,9 @@ with OpenPnP's own job processor (POST /job/place), then checked right away with
 
 The plan is printed and nothing moves before you confirm it (--yes skips the questions). It
 stops at the first group that is not placed completely. The report goes to
-ai-bridge/reports/<time>/report.json, with the photos of placements that did not pass; when a
-run fails, give that report to the AI. Only the Python standard library is used.
+ai-bridge/reports/<time>-run_job/report.json (format: report.py), with the photos of placements
+that did not pass and the troubleshooting entries that match the errors; when a run fails, give
+that report to the AI. Only the Python standard library is used.
 """
 import argparse
 import base64
@@ -23,6 +24,8 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import report as reports
 
 PLACE_TIMEOUT_S = 3600
 HEIGHT_DIGITS = 2
@@ -158,10 +161,9 @@ def main():
         return 0
 
     started = datetime.datetime.now()
-    run_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'reports',
-                           started.strftime('%Y%m%d-%H%M%S'))
-    os.makedirs(run_dir, exist_ok=True)
-    report = {'job': job_file, 'started': started.isoformat(timespec='seconds'),
+    run_dir = reports.run_dir('run_job', started)
+    report = {'script': 'run_job', 'job': job_file,
+              'started': started.isoformat(timespec='seconds'), 'args': vars(args),
               'config': config_dir, 'status': 'running', 'groups': [], 'placements': {}}
     for p in selected:
         report['placements']['%s %s' % (short_id(p['boardId']), p['placementId'])] = {
@@ -175,9 +177,11 @@ def main():
             report['message'] = message
         if result is not None and 'nozzlesAfterFailure' in result:
             report['nozzlesAfterFailure'] = result['nozzlesAfterFailure']
-        path = os.path.join(run_dir, 'report.json')
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, ensure_ascii=False, indent=1)
+        elif status != 'done':
+            report['nozzlesAfterFailure'] = bridge.call('GET', '/nozzles').get('nozzles')
+        texts = [r for p in report['placements'].values() for r in p.get('reasons', [])]
+        texts += [str(r) for r in report.get('partsRejected', [])]
+        path = reports.finish(run_dir, report, texts)
         counts = {}
         for p in report['placements'].values():
             counts[p['verdict']] = counts.get(p['verdict'], 0) + 1
@@ -194,6 +198,7 @@ def main():
                     for n in report['nozzlesAfterFailure'] if n.get('partOnNozzle')]
             if held:
                 print('Parts may still be on nozzles: ' + ', '.join(held))
+        reports.print_hints(report)
         print('Report: ' + path)
         if status != 'done':
             print('Give this report to the AI to find out what went wrong.')

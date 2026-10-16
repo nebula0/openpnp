@@ -13,16 +13,20 @@ the machine homed.
 
 The size check is what tells a part from the nozzle tip's reflection, so it must be on: turn it
 on with --enable-size-check (BodySize, --size-tolerance percent) or update_part. When no
-threshold passes, or the result is unclear, give the output to the AI. Only the Python
+threshold passes, or the result is unclear, give the report to the AI
+(ai-bridge/reports/<time>-tune_bottom_vision/report.json, format: report.py). Only the Python
 standard library is used.
 """
 import argparse
+import datetime
 import json
 import os
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+import report as reports
 
 
 class Bridge:
@@ -124,13 +128,34 @@ def main():
              ', '.join('%g' % r for r in rotations), ' Then write it.' if args.apply else ''))
     if not args.yes and input('Go? [y/N] ').strip().lower() != 'y':
         return 1
+    started = datetime.datetime.now()
+    directory = reports.run_dir('tune_bottom_vision', started)
+    report = {'script': 'tune_bottom_vision', 'started': started.isoformat(timespec='seconds'),
+              'args': vars(args), 'config': config_dir, 'partId': part_id,
+              'feeder': feeder['name'], 'visionBefore': vision, 'status': 'running',
+              'thresholds': []}
+    texts = []
+
+    def done(status, message=None):
+        report['status'] = status
+        if message:
+            report['message'] = message
+            print(message)
+        if status != 'done':
+            report['nozzlesAfterFailure'] = bridge.call('GET', '/nozzles').get('nozzles')
+        path = reports.finish(directory, report, texts)
+        reports.print_hints(report)
+        print('Report: ' + path)
+        if status != 'done':
+            print('Give the report to the AI.')
+        return 0 if status == 'done' else 1
 
     pick = bridge.call('POST', '/feeder/pick', body={
         'feederId': feeder['id'], 'nozzleId': args.nozzle, 'returnPart': False, 'confirm': True,
         'reason': why + ': pick a part to tune its bottom vision'})
     if pick.get('status') != 'ok':
-        print('Pick failed: %s' % pick.get('error'))
-        return 1
+        texts.append(pick.get('error'))
+        return done('failed', 'Pick failed: %s' % pick.get('error'))
     nozzle = pick['nozzleId']
 
     def run(threshold, rotation):
@@ -138,16 +163,19 @@ def main():
             'nozzleId': nozzle, 'threshold': threshold, 'rotation': rotation, 'confirm': True,
             'reason': why + ': threshold %d at %g deg' % (threshold, rotation)})
         if result.get('status') != 'ok':
+            texts.append(result.get('error'))
             return False, None, 'error: %s' % result.get('error')
         shots = result.get('shots', [])
         ok = bool(shots) and all(s.get('found') and s.get('sizeCheck') == 'ok' for s in shots)
         s = shots[0] if shots else {}
+        report['thresholds'].append({'threshold': threshold, 'rotation': rotation, 'ok': ok,
+                                     'shots': shots})
         text = ('%.2f x %.2f mm, %6.1f deg, %s' % (s.get('widthMm', 0), s.get('heightMm', 0),
                                                   s.get('angle', 0), s.get('sizeCheck'))
                 if s.get('found') else 'not found')
         return ok, s.get('angle'), text
 
-    chosen = None
+    failure = None
     try:
         results = []
         for threshold in thresholds:
@@ -165,41 +193,46 @@ def main():
                 ANGLE_SPREAD_DEG, median, ', '.join(map(str, dropped))))
         best = widest_run(passing)
         if not best:
-            print('No threshold passed. Give this output to the AI.')
-            return 1
-        chosen = best[len(best) // 2]
-        print('Passing %d..%d, chosen %d.' % (best[0], best[-1], chosen))
-        if len(best) < 3:
-            print('Warning: the passing range is narrow; a small change in light could break it.')
-        for rotation in rotations[1:]:
-            ok, _, text = run(chosen, rotation)
-            print('  %3d at %g deg: %s %s' % (chosen, rotation, 'ok' if ok else 'FAILED', text))
-            if not ok:
-                print('The chosen threshold fails at %g deg. Give this output to the AI.'
-                      % rotation)
-                chosen = None
-                return 1
+            failure = 'No threshold passed.'
+        else:
+            chosen = best[len(best) // 2]
+            report['passing'] = [best[0], best[-1]]
+            report['chosen'] = chosen
+            print('Passing %d..%d, chosen %d.' % (best[0], best[-1], chosen))
+            if len(best) < 3:
+                report['warning'] = 'narrow passing range'
+                print('Warning: the passing range is narrow; a small change in light could '
+                      'break it.')
+            for rotation in rotations[1:]:
+                ok, _, text = run(chosen, rotation)
+                print('  %3d at %g deg: %s %s' % (chosen, rotation, 'ok' if ok else 'FAILED',
+                                                  text))
+                if not ok:
+                    failure = 'The chosen threshold %d fails at %g deg.' % (chosen, rotation)
+                    break
     finally:
         discard = bridge.call('POST', '/nozzle/discard', body={
             'nozzleId': nozzle, 'confirm': True, 'reason': why + ': discard the test part'})
         if discard.get('status') != 'ok':
-            print('Discarding failed, a part may still be on %s: %s' % (nozzle,
-                                                                       discard.get('error')))
+            failure = (failure or '') + ' Discarding failed, a part may still be on %s: %s' % (
+                nozzle, discard.get('error'))
+    if failure:
+        return done('failed', failure.strip())
 
     if not args.apply:
         print('Not written (no --apply).')
-        return 0
+        return done('done')
     target = ('/package/update', {'packageId': part['packageId']}) if args.package else (
         '/part/update', {'partId': part_id})
     result = bridge.call('POST', target[0], body=dict(
         target[1], bottomVisionThreshold=chosen,
         reason=why + ': middle of the passing range %d..%d' % (best[0], best[-1])))
+    report['written'] = result
     if result.get('status') != 'ok':
-        print('Writing failed: %s' % result.get('error'))
-        return 1
+        return done('failed', 'Writing failed: %s' % result.get('error'))
     print('Written: threshold %d for %s %s.' % (chosen, 'package' if args.package else 'part',
-                                                 target[1].popitem()[1]))
-    return 0
+                                                 list(target[1].values())[0]))
+    return done('done')
 
 
 if __name__ == '__main__':

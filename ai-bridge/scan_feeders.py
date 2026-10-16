@@ -9,7 +9,8 @@ updates or adds a strip feeder per label. OpenPnP must be running with the AI br
     python ai-bridge/scan_feeders.py --y 199.5 --from 120 --to 160 --apply    # change feeders
     python ai-bridge/scan_feeders.py --y 199.5 --from 120 --to 160 --apply --verify
 
-With --verify, each new feeder (added disabled) is then checked and enabled only if all of
+Each run that moves the machine writes ai-bridge/reports/<time>-scan_feeders/report.json
+(format: report.py). With --verify, each new feeder (added disabled) is then checked and enabled only if all of
 this passes: its pick Z is measured with the vacuum sensor (probe, written as contact - 0.1),
 one part is picked, its bottom vision finds it with the part size check passing, and the part
 is discarded. --verify-all checks the updated feeders too (they keep their enabled state).
@@ -18,20 +19,25 @@ A part that is picked is always discarded: strip feeders cannot take parts back.
 Only the Python standard library is used. The machine moves only after you confirm the plan.
 """
 import argparse
+import datetime
 import json
 import os
 import sys
 import urllib.error
 import urllib.request
 
+import report as reports
+
 PICK_Z_BELOW_CONTACT = 0.1
 
 
 def call(config_dir, path, body, timeout=900):
+    """POSTs body to the bridge, or GETs if body is None."""
     info = json.load(open(os.path.join(config_dir, 'ai-bridge', 'bridge.json')))
     request = urllib.request.Request(
         'http://127.0.0.1:%d%s' % (info['port'], path),
-        data=json.dumps(body).encode('utf-8'), method='POST',
+        data=None if body is None else json.dumps(body).encode('utf-8'),
+        method='GET' if body is None else 'POST',
         headers={'X-AI-Bridge-Token': info['token'], 'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -149,10 +155,27 @@ def main():
               % ('new or updated' if args.verify_all else 'new'))
     if not args.yes and input('Make sure nothing is in the way. Go? [y/N] ').lower() != 'y':
         return 1
+    started = datetime.datetime.now()
+    directory = reports.run_dir('scan_feeders', started)
+    report = {'script': 'scan_feeders', 'started': started.isoformat(timespec='seconds'),
+              'args': vars(args), 'config': config_dir, 'status': 'running'}
+
+    def done(status, message=None, texts=()):
+        report['status'] = status
+        if message:
+            report['message'] = message
+        if status != 'done':
+            report['nozzlesAfterFailure'] = call(config_dir, '/nozzles', None).get('nozzles')
+        path = reports.finish(directory, report, texts)
+        reports.print_hints(report)
+        print('Report: ' + path)
+        return 0 if status == 'done' else 1
+
     result = call(config_dir, '/feeder/scan-qr', dict(body, confirm=True))
+    report['scan'] = result
     if result.get('status') != 'ok':
         print(json.dumps(result, ensure_ascii=False, indent=1))
-        return 1
+        return done('failed', 'Scan failed: %s' % result.get('error'))
     print('%d label(s) found, %s' % (result['labelsFound'],
                                      'applied' if result['applied'] else 'dry run'))
     for label in result['labels']:
@@ -163,10 +186,14 @@ def main():
                 'first pick %.2f %.2f, %s parts seen, feeder %s' % (
                     pick['x'], pick['y'], label.get('partsFound'),
                     label.get('feederName', 'new')) if pick else '')))
+    label_errors = [label.get('error') for label in result['labels'] if label.get('error')]
     if not (args.verify or args.verify_all):
-        return 0
+        return done('failed' if label_errors else 'done',
+                    '%d label(s) failed' % len(label_errors) if label_errors else None,
+                    label_errors)
 
     failed = 0
+    report['verify'] = []
     for label in result['labels']:
         wanted = label.get('status') == 'added' or (args.verify_all
                                                     and label.get('status') == 'updated')
@@ -183,9 +210,15 @@ def main():
             passed = enable.get('status') == 'ok'
             print('  enabled' if passed else '  enabling failed: %s' % enable.get('error'))
         print('  PASSED' if passed else '  FAILED: the feeder keeps its enabled state; '
-              'give this output to the AI')
+              'give the report to the AI')
+        report['verify'].append({'feederId': label['feederId'], 'feederName': label['feederName'],
+                                 'passed': passed, 'steps': steps})
         failed += 0 if passed else 1
-    return 1 if failed else 0
+    steps = [step for v in report['verify'] for step in v['steps']]
+    if failed or label_errors:
+        return done('failed', '%d feeder(s) failed verification, %d label(s) failed'
+                    % (failed, len(label_errors)), label_errors + steps)
+    return done('done')
 
 
 if __name__ == '__main__':
