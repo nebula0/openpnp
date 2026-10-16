@@ -44,6 +44,8 @@ import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
@@ -75,6 +77,7 @@ import org.openpnp.machine.reference.ReferenceNozzleTip;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
 import org.openpnp.machine.reference.vision.ReferenceBottomVision;
+import org.openpnp.machine.reference.vision.ReferenceBottomVision.PartSizeCheckMethod;
 import org.openpnp.model.BoardLocation;
 import org.openpnp.model.BottomVisionSettings;
 import org.openpnp.model.Configuration;
@@ -1039,6 +1042,9 @@ public class AiBridgeServer {
         v.addProperty("settingsName", settings.getName());
         v.addProperty("own", holder.getBottomVisionSettings() == settings);
         v.add("thresholds", thresholdsOf(settings));
+        v.addProperty("checkPartSize", settings.getCheckPartSizeMethod()
+                                               .toString());
+        v.addProperty("checkSizeTolerancePercent", settings.getCheckSizeTolerancePercent());
         return v;
     }
 
@@ -1055,12 +1061,13 @@ public class AiBridgeServer {
 
     /**
      * Sets a part's height, name (e.g. its manufacturer or LCSC part number) and/or bottom vision
-     * threshold. Does not move the machine.
+     * settings. Does not move the machine.
      *
-     * Body: {partId, height (mm), name, bottomVisionThreshold (0-255)}. With a threshold, the
-     * part gets settings of its own if it has none yet: a copy of those it inherits, named after
-     * the part, as the Specialize button in the GUI does. Then the threshold of all enabled
-     * Threshold stages of its pipeline is set.
+     * Body: {partId, height (mm), name, bottomVisionThreshold (0-255), checkPartSize (Disabled,
+     * BodySize, PadExtents), checkSizeTolerancePercent}. With a vision change, the part gets
+     * settings of its own if it has none yet: a copy of those it inherits, named after the part,
+     * as the Specialize button in the GUI does. The threshold applies to all enabled Threshold
+     * stages of its pipeline.
      */
     private JsonObject updatePart(JsonObject body) throws Exception {
         String partId = getString(body, "partId");
@@ -1075,9 +1082,10 @@ public class AiBridgeServer {
             throw new BadRequest("height must be between 0 and 30 mm.");
         }
         String name = getString(body, "name");
-        int threshold = getThreshold(body);
-        if (Double.isNaN(height) && name == null && threshold < 0) {
-            throw new BadRequest("Give height, name and/or bottomVisionThreshold.");
+        VisionChange vision = new VisionChange(body);
+        if (Double.isNaN(height) && name == null && !vision.any()) {
+            throw new BadRequest("Give height, name, bottomVisionThreshold, checkPartSize "
+                    + "and/or checkSizeTolerancePercent.");
         }
         JsonObject o = ok();
         o.add("before", partJson(part));
@@ -1088,8 +1096,8 @@ public class AiBridgeServer {
             if (name != null) {
                 part.setName(name);
             }
-            if (threshold >= 0) {
-                o.addProperty("createdSettings", setBottomVisionThreshold(part, threshold));
+            if (vision.any()) {
+                o.addProperty("createdSettings", changeBottomVision(part, vision));
             }
             MainFrame.get()
                      .getPartsTab()
@@ -1102,11 +1110,11 @@ public class AiBridgeServer {
     }
 
     /**
-     * Sets the bottom vision threshold of a package, which its parts inherit unless they have
+     * Changes the bottom vision settings of a package, which its parts inherit unless they have
      * settings of their own. Does not move the machine.
      *
-     * Body: {packageId, bottomVisionThreshold (0-255)}. As for a part, the package gets settings
-     * of its own first if it shares them with others.
+     * Body: {packageId, bottomVisionThreshold (0-255), checkPartSize, checkSizeTolerancePercent}.
+     * As for a part, the package gets settings of its own first if it shares them with others.
      */
     private JsonObject updatePackage(JsonObject body) throws Exception {
         String packageId = getString(body, "packageId");
@@ -1116,15 +1124,16 @@ public class AiBridgeServer {
         if (pkg == null) {
             throw new BadRequest("No package with id " + packageId);
         }
-        int threshold = getThreshold(body);
-        if (threshold < 0) {
-            throw new BadRequest("Give bottomVisionThreshold.");
+        VisionChange vision = new VisionChange(body);
+        if (!vision.any()) {
+            throw new BadRequest("Give bottomVisionThreshold, checkPartSize and/or "
+                    + "checkSizeTolerancePercent.");
         }
         JsonObject o = ok();
         o.addProperty("packageId", pkg.getId());
         o.add("bottomVisionBefore", bottomVisionJson(pkg));
         onSwing(() -> {
-            o.addProperty("createdSettings", setBottomVisionThreshold(pkg, threshold));
+            o.addProperty("createdSettings", changeBottomVision(pkg, vision));
             return null;
         });
         o.add("bottomVision", bottomVisionJson(pkg));
@@ -1155,13 +1164,48 @@ public class AiBridgeServer {
     }
 
     /**
-     * Sets the threshold of the enabled Threshold stages in the bottom vision settings of a part
-     * or package. If the holder has no settings of its own, or shares them with others, it first
-     * gets a copy of the settings it uses, so that nothing else changes.
+     * The bottom vision changes asked for in a body: bottomVisionThreshold (0-255),
+     * checkPartSize (Disabled, BodySize or PadExtents) and checkSizeTolerancePercent.
+     */
+    private static class VisionChange {
+        int threshold;
+        PartSizeCheckMethod checkMethod;
+        int tolerancePercent = -1;
+
+        VisionChange(JsonObject body) throws BadRequest {
+            threshold = getThreshold(body);
+            String method = getString(body, "checkPartSize");
+            if (method != null) {
+                try {
+                    checkMethod = PartSizeCheckMethod.valueOf(method);
+                }
+                catch (IllegalArgumentException e) {
+                    throw new BadRequest("checkPartSize must be Disabled, BodySize or PadExtents.");
+                }
+            }
+            double tolerance = getDouble(body, "checkSizeTolerancePercent", Double.NaN);
+            if (!Double.isNaN(tolerance)) {
+                if (tolerance < 1 || tolerance > 300 || tolerance != Math.rint(tolerance)) {
+                    throw new BadRequest(
+                            "checkSizeTolerancePercent must be a whole number from 1 to 300.");
+                }
+                tolerancePercent = (int) tolerance;
+            }
+        }
+
+        boolean any() {
+            return threshold >= 0 || checkMethod != null || tolerancePercent >= 0;
+        }
+    }
+
+    /**
+     * Changes the bottom vision settings of a part or package. If the holder has no settings of
+     * its own, or shares them with others, it first gets a copy of the settings it uses, so that
+     * nothing else changes.
      *
      * @return whether new settings were created.
      */
-    private static boolean setBottomVisionThreshold(PartSettingsHolder holder, int threshold)
+    private static boolean changeBottomVision(PartSettingsHolder holder, VisionChange change)
             throws Exception {
         BottomVisionSettings settings =
                 ReferenceBottomVision.getDefault()
@@ -1181,17 +1225,25 @@ public class AiBridgeServer {
                          .addVisionSettings(own);
             settings = own;
         }
-        boolean found = false;
-        for (CvStage stage : settings.getPipeline()
-                                     .getStages()) {
-            if (stage instanceof Threshold && stage.isEnabled()) {
-                ((Threshold) stage).setThreshold(threshold);
-                found = true;
+        if (change.threshold >= 0) {
+            boolean found = false;
+            for (CvStage stage : settings.getPipeline()
+                                         .getStages()) {
+                if (stage instanceof Threshold && stage.isEnabled()) {
+                    ((Threshold) stage).setThreshold(change.threshold);
+                    found = true;
+                }
+            }
+            if (!found) {
+                throw new Exception("The bottom vision pipeline \"" + settings.getName()
+                        + "\" has no enabled Threshold stage.");
             }
         }
-        if (!found) {
-            throw new Exception("The bottom vision pipeline \"" + settings.getName()
-                    + "\" has no enabled Threshold stage.");
+        if (change.checkMethod != null) {
+            settings.setCheckPartSizeMethod(change.checkMethod);
+        }
+        if (change.tolerancePercent >= 0) {
+            settings.setCheckSizeTolerancePercent(change.tolerancePercent);
         }
         Configuration.get()
                      .fireVisionSettingsChanged();
@@ -1310,6 +1362,8 @@ public class AiBridgeServer {
                                     rect.angle)));
                             s.addProperty("widthMm", round(rect.size.width * upp.getX()));
                             s.addProperty("heightMm", round(rect.size.height * upp.getY()));
+                            s.addProperty("sizeCheck",
+                                    sizeCheck(bottomVision, part, settings, rect, camera));
                         }
                         shots.add(s);
                         for (CvStage stage : pipeline.getStages()) {
@@ -1342,6 +1396,32 @@ public class AiBridgeServer {
                     + "rectangle found, if any.");
             return o;
         });
+    }
+
+    /**
+     * Runs OpenPnP's own part size check of the bottom vision on a result, as a job would.
+     *
+     * @return "disabled", "ok", or why the part would be rejected.
+     */
+    private static String sizeCheck(ReferenceBottomVision bottomVision, Part part,
+            BottomVisionSettings settings, RotatedRect rect, Camera camera) {
+        if (settings.getCheckPartSizeMethod() == PartSizeCheckMethod.Disabled) {
+            return "disabled";
+        }
+        try {
+            Method check = ReferenceBottomVision.class.getDeclaredMethod("partSizeCheck",
+                    Part.class, BottomVisionSettings.class, RotatedRect.class, Camera.class);
+            check.setAccessible(true);
+            check.invoke(bottomVision, part, settings, rect, camera);
+            return "ok";
+        }
+        catch (InvocationTargetException e) {
+            return e.getCause()
+                    .getMessage();
+        }
+        catch (Exception e) {
+            return "could not run the check: " + describe(e);
+        }
     }
 
     private static JsonObject namedImage(String name, BufferedImage image) throws IOException {
@@ -2641,9 +2721,11 @@ public class AiBridgeServer {
                 double direction = Math.signum(tapeOffset);
                 // Photos 8 mm apart, i.e. two hole pitches, put the holes at the same place in
                 // each photo. If the hole beyond the first part is cut off at the edge of one,
-                // it would be in all of them, so then look again half a pitch further on.
+                // it would be in all of them, so then look again half a pitch and a pitch
+                // further on: one of these has that hole in view and the first part still in it.
                 search: for (double d = 0; d <= searchLength; d += 8) {
-                    for (double nudge : new double[] {0, StripTapeLocator.HOLE_PITCH / 2}) {
+                    for (double nudge : new double[] {0, StripTapeLocator.HOLE_PITCH / 2,
+                            StripTapeLocator.HOLE_PITCH}) {
                         MovableUtils.moveToLocationAtSafeZ(camera,
                                 camera.getLocation()
                                       .convertToUnits(LengthUnit.Millimeters)

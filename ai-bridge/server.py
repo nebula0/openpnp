@@ -385,7 +385,9 @@ def test_bottom_vision(
 
     The nozzle (default: the one holding a part) goes over the bottom camera at Safe Z and the
     part's bottom vision pipeline runs as in a job. Returns per shot found, offsetX/offsetY (mm),
-    angle and the size found (widthMm/heightMm), plus the camera image, the Threshold stage output
+    angle, the size found (widthMm/heightMm) and sizeCheck (the verdict of the part size check a
+    job would apply: disabled, ok or why the part would be rejected), plus the camera image, the
+    Threshold stage output
     and the final image, also when nothing was found. threshold overrides the Threshold stages for
     this run only (nothing is saved), so several values can be tried with the same part. The part
     stays on the nozzle: pick it first with pick_from_feeder(return_part=False), discard it after.
@@ -428,26 +430,40 @@ def update_part(
     height: float | None = None,
     name: str | None = None,
     bottom_vision_threshold: int | None = None,
+    check_part_size: str | None = None,
+    check_size_tolerance_percent: int | None = None,
 ) -> str:
     """Set a part's height (mm, top of the part above the board), name (e.g. its manufacturer or
-    LCSC part number) and/or bottom vision threshold. Does not move the machine.
+    LCSC part number) and/or bottom vision settings. Does not move the machine.
 
-    With a threshold the part gets bottom vision settings of its own, a copy of those it
-    inherits (usually its package's), if it has none yet; its package and other parts keep
-    theirs. Find the threshold with test_bottom_vision(threshold=...) first. The result shows
-    the values before and after."""
+    Bottom vision: threshold (0-255), check_part_size (Disabled, BodySize or PadExtents: reject
+    a part whose measured size is off its footprint by more than check_size_tolerance_percent,
+    which also catches an empty nozzle) and the tolerance. With any of these the part gets bottom
+    vision settings of its own, a copy of those it inherits (usually its package's), if it has
+    none yet; its package and other parts keep theirs. Find the values with
+    test_bottom_vision(threshold=...) first (its sizeCheck shows the check's verdict). The result
+    shows the values before and after."""
     body = {"partId": part_id, "height": height, "name": name,
-            "bottomVisionThreshold": bottom_vision_threshold, "reason": reason}
+            "bottomVisionThreshold": bottom_vision_threshold, "checkPartSize": check_part_size,
+            "checkSizeTolerancePercent": check_size_tolerance_percent, "reason": reason}
     return json.dumps(_call("POST", "/part/update", body=body), ensure_ascii=False, indent=1)
 
 
 @mcp.tool()
-def update_package(package_id: str, bottom_vision_threshold: int, reason: str) -> str:
-    """Set the bottom vision threshold of a package, used by its parts that have no settings
-    of their own (partsInheriting in the result). If the package shares its settings with
-    others, it gets a copy of its own first. Does not move the machine."""
+def update_package(
+    package_id: str,
+    reason: str,
+    bottom_vision_threshold: int | None = None,
+    check_part_size: str | None = None,
+    check_size_tolerance_percent: int | None = None,
+) -> str:
+    """Change the bottom vision settings of a package (threshold, check_part_size: Disabled,
+    BodySize or PadExtents, and its tolerance in percent), used by its parts that have no
+    settings of their own (partsInheriting in the result). If the package shares its settings
+    with others, it gets a copy of its own first. Does not move the machine."""
     body = {"packageId": package_id, "bottomVisionThreshold": bottom_vision_threshold,
-            "reason": reason}
+            "checkPartSize": check_part_size,
+            "checkSizeTolerancePercent": check_size_tolerance_percent, "reason": reason}
     return json.dumps(_call("POST", "/package/update", body=body), ensure_ascii=False, indent=1)
 
 
