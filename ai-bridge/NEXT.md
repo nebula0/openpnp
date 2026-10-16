@@ -9,6 +9,7 @@
 - 程式：分支 `ai-bridge`，已推到 GitHub。`target/` 裡的 jar 包含所有改動（QR 掃描分 5 排、定位孔 opening 修正等）。
 - 真機設定資料夾 `~/.openpnp2` 已經用本機 git 管理；OpenPnP 關閉時，`start-openpnp.bat` 會自動 commit。
 - OpenPnP 現在可能沒有在跑，或者在跑但還沒歸零：**先 `get_status`**，需要時重新啟動（`ai-bridge\start-openpnp.bat`）。
+- 相機找不到（紅叉、`FIDUCIAL-HOME no matches found`）：USB 路徑可能又變了，照 `knowledge/troubleshooting.md` 跑 `ai-bridge/fix_cameras.py`。歸零後一定要拍上相機確認看到的是平台（10/16 接反時歸零照樣「成功」）。
 - 板子 `fm_pnp`（`C:\Users\Acer\Desktop\fm_pnp_test\fm_pnp.job.xml`，4 片拼板）：最後的狀態是 Brd3 的 C6 有放；Brd1 的 C6 被歸零震到焊墊外；Brd2、Brd4 是空的。AD608 都被使用者拿掉了。**實際狀況要先問使用者。** 空板參考照（`ai-bridge/inspect/bare/`）是在全部清空時拍的，還能用。
 - 料帶架：一排三條 8 mm 紙帶，QR 標籤貼在料帶上，料帶從標籤底下往 −Y 延伸。
   - 標籤那一排：Y ≈ 197–199.5、X 115–165。

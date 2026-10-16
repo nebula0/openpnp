@@ -80,8 +80,18 @@
 ## 機器與 OpenPnP
 
 ### `FIDUCIAL-HOME no matches found`，歸零失敗
-- 原因：底部相機被蓋住了（10/13 是一個塑膠袋）。
-- 先試：看底部相機有沒有被遮住。
+可能的原因，依常見程度排列：
+1. **OpenPnP 找不到相機**（10/16）：`capture_camera` 拍到的是灰底加紅色大叉，不是真的照片；log 有 `No camera found with ID ...` 或 `Camera Top failed to return an image`。見下一條。
+2. 底部相機被蓋住了（10/13 是一個塑膠袋）。先看底部相機有沒有被遮住。
+
+### 相機只有紅色大叉、`No camera found with ID ...`，或上下相機對調
+- 原因：兩台相機（Alcor `058F:0363`）沒有序號，Windows 用它們在 USB 樹裡的位置產生裝置路徑（例如 `8&1654aaea`），`machine.xml` 的 `unique-id` 記的就是這個路徑。**沒有換孔也可能改變**：重開機、拔插、hub 重新列舉之後都可能變（9/8、10/16 都發生過）。另外 Windows 相機 App 之類的程式占著相機時，OpenPnP 也打不開，而且之後不會自己重開，要重啟 OpenPnP。Windows 給的名字（LumenPnP Top／Bottom）不可靠，不能拿來判斷哪台是哪台。
+- 先試：
+  1. 關掉 Windows 相機 App 等可能占用相機的程式，**正常關閉 OpenPnP**。
+  2. `python ai-bridge/fix_cameras.py`：比對設定和 Windows 現在看到的相機。印 OK 就不是路徑的問題，檢查 USB 線。
+  3. 路徑對不上就加 `--apply`：寫入新路徑並在 `~/.openpnp2` commit。兩台都換了路徑時，哪台是 Top 是猜的。
+  4. 啟動 OpenPnP、歸零之後，**一定要拍上相機確認**：在歸零位置要看到十字靶 fiducial，而且噴頭移動時畫面要跟著變。如果看到的是失焦、不會動、往上看噴頭的畫面，或 GUI 的 Bottom 視窗是上下顛倒的平台，就是接反了：關閉 OpenPnP，執行 `fix_cameras.py --swap`，再啟動、**重新歸零**。
+- 注意：**歸零成功不代表上相機接對了。** 10/16 上下接反時，fiducial 歸零在底部相機的畫面裡誤判成功，座標因此可能偏掉。接反時做過的歸零都不算數，改好之後要重新歸零。
 
 ### `Effective Safe Z coordinate ... is outside Safe Z Zone`，吸嘴卡在下面
 - 原因：N2 開了 dynamic safe Z，吸著有高度的零件時 Safe Z 會超出 Safe Zone。
