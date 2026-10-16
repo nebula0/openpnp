@@ -21,7 +21,11 @@ package org.openpnp.machine.reference.camera;
 
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.openpnp.capture.CaptureDevice;
 import org.openpnp.capture.CaptureFormat;
@@ -32,6 +36,8 @@ import org.openpnp.capture.PropertyLimits;
 import org.openpnp.gui.support.Wizard;
 import org.openpnp.machine.reference.camera.wizards.OpenPnpCaptureCameraConfigurationWizard;
 import org.openpnp.model.AbstractModelObject;
+import org.openpnp.model.Configuration;
+import org.openpnp.spi.Camera;
 import org.openpnp.spi.PropertySheetHolder;
 import org.pmw.tinylog.Logger;
 import org.simpleframework.xml.Attribute;
@@ -39,6 +45,9 @@ import org.simpleframework.xml.Element;
 import org.simpleframework.xml.core.Commit;
 
 public class OpenPnpCaptureCamera extends ReferenceCamera implements Runnable {
+    private static final Pattern USB_MODEL = Pattern.compile("vid_[0-9a-f]{4}&pid_[0-9a-f]{4}",
+            Pattern.CASE_INSENSITIVE);
+
     private OpenPnpCapture capture = new OpenPnpCapture();
 
     private CaptureDevice device;
@@ -169,8 +178,15 @@ public class OpenPnpCaptureCamera extends ReferenceCamera implements Runnable {
                 }
             }
             if (device == null) {
-                Logger.warn("No camera found with ID {} for camera {}", uniqueId, getName());
-                return;
+                device = findSubstituteDevice();
+                if (device == null) {
+                    Logger.warn("No camera found with ID {} for camera {}", uniqueId, getName());
+                    return;
+                }
+                Logger.warn("No camera found with ID {} for camera {}, using {} of the same model instead. "
+                        + "Check that the camera shows what it should.", uniqueId, getName(),
+                        device.getUniqueId());
+                uniqueId = device.getUniqueId();
             }
 
             if (formatId == null) {
@@ -209,6 +225,58 @@ public class OpenPnpCaptureCamera extends ReferenceCamera implements Runnable {
         }
 
         super.open();
+    }
+
+    /**
+     * Cameras without a serial number are identified by their place in the USB tree, which the
+     * operating system may change after a reboot or replugging. When the stored device is gone,
+     * this finds a device of the same model (USB vendor and product id) that no other camera of
+     * the machine uses. If several are free, the first by id is taken: with identical cameras
+     * nothing tells them apart, so they may come out swapped.
+     *
+     * @return the device, or null if there is none or the stored id has no USB vendor and
+     *         product id.
+     */
+    private CaptureDevice findSubstituteDevice() {
+        Matcher model = USB_MODEL.matcher(uniqueId);
+        if (!model.find()) {
+            return null;
+        }
+        String modelId = model.group()
+                              .toLowerCase();
+        List<CaptureDevice> devices = capture.getDevices();
+        Set<String> presentIds = new HashSet<>();
+        for (CaptureDevice candidate : devices) {
+            presentIds.add(candidate.getUniqueId());
+        }
+        Set<String> usedIds = new HashSet<>();
+        try {
+            for (Camera camera : Configuration.get()
+                                              .getMachine()
+                                              .getAllCameras()) {
+                if (camera != this && camera instanceof OpenPnpCaptureCamera) {
+                    String id = ((OpenPnpCaptureCamera) camera).uniqueId;
+                    if (id != null && presentIds.contains(id)) {
+                        usedIds.add(id);
+                    }
+                }
+            }
+        }
+        catch (Exception e) {
+            // No machine yet: nothing to compare with, so do not guess.
+            return null;
+        }
+        CaptureDevice substitute = null;
+        for (CaptureDevice candidate : devices) {
+            String id = candidate.getUniqueId();
+            if (id.toLowerCase()
+                  .contains(modelId)
+                    && !usedIds.contains(id)
+                    && (substitute == null || id.compareTo(substitute.getUniqueId()) < 0)) {
+                substitute = candidate;
+            }
+        }
+        return substitute;
     }
 
     public synchronized double estimateCaptureFps() throws Exception {

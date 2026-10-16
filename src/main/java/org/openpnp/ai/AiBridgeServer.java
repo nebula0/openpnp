@@ -65,7 +65,9 @@ import javax.imageio.ImageIO;
 import javax.swing.SwingUtilities;
 
 import org.apache.commons.io.IOUtils;
+import org.opencv.core.CvType;
 import org.opencv.core.Mat;
+import org.opencv.core.Point;
 import org.opencv.core.RotatedRect;
 import org.opencv.imgproc.Imgproc;
 import org.openpnp.bedmap.BedMap;
@@ -641,11 +643,102 @@ public class AiBridgeServer {
         }
         return runLogged("machine/home", body, machine, () -> {
             machine.home();
-            JsonObject o = ok();
+            JsonObject check = checkTopCameraFollowsHead(machine.getDefaultHead()
+                                                                .getDefaultCamera());
+            JsonObject o = check.get("ok")
+                                .getAsBoolean() ? ok()
+                                        : error("Top camera picture did not follow the head: "
+                                                + check.get("message")
+                                                       .getAsString()
+                                                + " The cameras may be swapped or the Top camera "
+                                                + "may not be looking at the bed. Close OpenPnP "
+                                                + "and run ai-bridge/fix_cameras.py (--swap if "
+                                                + "the paths are right).");
             o.addProperty("enabled", machine.isEnabled());
             o.addProperty("homed", machine.isHomed());
+            o.add("topCameraCheck", check);
             return o;
         });
+    }
+
+    /** How far the head moves in X to check that the Top camera picture follows it, in mm. */
+    private static final double CAMERA_CHECK_MOVE_MM = 3;
+
+    /**
+     * Checks that a camera on the head really looks at the bed: takes a photo, moves the head
+     * CAMERA_CHECK_MOVE_MM in X, takes another and moves back. The picture must shift by the
+     * expected number of pixels (phase correlation). With the USB paths of two identical cameras
+     * swapped, the "Top" camera is the fixed one looking up, and its picture does not shift;
+     * homing on a fiducial may still succeed then. Must run on the machine thread.
+     *
+     * @return {ok, message, expectedShiftPx, shiftPx: {x, y}, response, photos}
+     */
+    private JsonObject checkTopCameraFollowsHead(Camera camera) throws Exception {
+        Location start = camera.getLocation()
+                               .convertToUnits(LengthUnit.Millimeters);
+        BufferedImage before = camera.lightSettleAndCapture();
+        MovableUtils.moveToLocationAtSafeZ(camera,
+                start.derive(start.getX() + CAMERA_CHECK_MOVE_MM, null, null, null));
+        BufferedImage after = camera.lightSettleAndCapture();
+        MovableUtils.moveToLocationAtSafeZ(camera, start);
+
+        File captures = new File(bridgeDirectory, "captures");
+        captures.mkdirs();
+        String stamp = new SimpleDateFormat("yyyyMMdd-HHmmss").format(new Date());
+        File beforeFile = new File(captures, stamp + "-camera-check-before.png");
+        File afterFile = new File(captures, stamp + "-camera-check-after.png");
+        ImageIO.write(before, "png", beforeFile);
+        ImageIO.write(after, "png", afterFile);
+
+        // A fixed point of the bed moves in the picture opposite to the camera.
+        double expected = -CAMERA_CHECK_MOVE_MM / camera.getUnitsPerPixel()
+                                                        .convertToUnits(LengthUnit.Millimeters)
+                                                        .getX();
+        Mat a = toGrayFloat(before);
+        Mat b = toGrayFloat(after);
+        Mat window = new Mat();
+        Imgproc.createHanningWindow(window, a.size(), CvType.CV_32F);
+        double[] response = new double[1];
+        Point shift = Imgproc.phaseCorrelate(a, b, window, response);
+        a.release();
+        b.release();
+        window.release();
+
+        double tolerance = 0.25 * Math.abs(expected);
+        boolean ok = Math.abs(shift.x - expected) <= tolerance && Math.abs(shift.y) <= tolerance;
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", ok);
+        o.addProperty("message",
+                "moved " + round(CAMERA_CHECK_MOVE_MM) + " mm in X, the picture moved "
+                        + round(shift.x) + ", " + round(shift.y) + " px, expected "
+                        + round(expected) + ", 0 px.");
+        o.addProperty("expectedShiftPx", round(expected));
+        JsonObject shiftJson = new JsonObject();
+        shiftJson.addProperty("x", round(shift.x));
+        shiftJson.addProperty("y", round(shift.y));
+        o.add("shiftPx", shiftJson);
+        o.addProperty("response", round(response[0]));
+        JsonArray photos = new JsonArray();
+        photos.add(new JsonPrimitive(beforeFile.getAbsolutePath()));
+        photos.add(new JsonPrimitive(afterFile.getAbsolutePath()));
+        o.add("photos", photos);
+        return o;
+    }
+
+    private static Mat toGrayFloat(BufferedImage image) {
+        Mat color = OpenCvUtils.toMat(image);
+        Mat gray = new Mat();
+        if (color.channels() == 1) {
+            color.copyTo(gray);
+        }
+        else {
+            Imgproc.cvtColor(color, gray, Imgproc.COLOR_BGR2GRAY);
+        }
+        color.release();
+        Mat result = new Mat();
+        gray.convertTo(result, CvType.CV_32F);
+        gray.release();
+        return result;
     }
 
     /**

@@ -118,6 +118,11 @@
   3. 路徑對不上就加 `--apply`：寫入新路徑並在 `~/.openpnp2` commit。兩台都換了路徑時，哪台是 Top 是猜的。
   4. 啟動 OpenPnP、歸零之後，**一定要拍上相機確認**：在歸零位置要看到十字靶 fiducial，而且噴頭移動時畫面要跟著變。如果看到的是失焦、不會動、往上看噴頭的畫面，或 GUI 的 Bottom 視窗是上下顛倒的平台，就是接反了：關閉 OpenPnP，執行 `fix_cameras.py --swap`，再啟動、**重新歸零**。
 - 注意：**歸零成功不代表上相機接對了。** 10/16 上下接反時，fiducial 歸零在底部相機的畫面裡誤判成功，座標因此可能偏掉。接反時做過的歸零都不算數，改好之後要重新歸零。
+- 10/16 起 OpenPnP 會自己處理一部分：找不到記錄的路徑時，改用同型號（VID/PID）、還沒被另一台相機用掉的裝置，log 寫 `No camera found with ID ... using ... of the same model instead`，新路徑在關閉時存進 `machine.xml`。兩台都換了路徑時一樣是猜的，所以下一條的檢查還是要看。
+
+### `Top camera picture did not follow the head: ...`（`home_machine`）
+- 原因：bridge 歸零後把噴頭沿 X 移 3 mm，上相機的畫面應該跟著平移約 3 mm 的像素數（phase correlation）。沒移、移錯方向或移太多，就代表「Top」其實是固定往上看的底部相機（上下對調），或上相機沒看到平台。
+- 先試：看結果裡 `topCameraCheck.photos` 的兩張照片。是往上看噴頭的失焦畫面 → 關閉 OpenPnP，`fix_cameras.py --swap`，再啟動、重新歸零。是平台但幾乎沒有紋理（整片同色）→ 檢查可能誤判，換個位置用 `move_camera` 拍照確認。
 
 ### `Effective Safe Z coordinate ... is outside Safe Z Zone`，吸嘴卡在下面
 - 原因：N2 開了 dynamic safe Z，吸著有高度的零件時 Safe Z 會超出 Safe Zone。
