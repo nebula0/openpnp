@@ -1,6 +1,6 @@
 # AI bridge：進度紀錄與未來規劃
 
-> 寫於 2026-10-16，對應 `ai-bridge` 分支 commit `f9f80e5a`（從 OpenPnP `5bd404cf` 起算共 33 個 commit）。
+> 寫於 2026-10-16，最後更新同一天。分支是 `ai-bridge`，從 OpenPnP 的 `5bd404cf` 開始。
 > 每天的細節在 [worklog/](../worklog/)，最初的計畫在 [AI_BRIDGE_PLAN.md](AI_BRIDGE_PLAN.md)。
 
 ## 1. 原則：能用腳本的就用腳本，腳本失敗時才由 AI 接手
@@ -12,65 +12,136 @@
   3. 抽查：偶爾看幾張照片，確認腳本的判斷還是準的。
 - 所以每支腳本都要做到兩件事：**輸出結構化的結果**（狀態、原因、數值），並且**把照片存檔**（`ai-bridge/inspect/`、`scan/`、`captures/`）。這樣 AI 接手時，不用重新移動機器就能查原因。
 
-## 2. 已完成的功能
+## 2. 已完成的功能：依流程分類
 
-「腳本可獨立完成」是指：這個功能本身的判斷不需要 AI，只要有人或腳本呼叫它就能完成。目前大多只能透過 MCP（Claude）呼叫，只有 `scan_feeders.py` 有命令列版本，見第 4.2 節。
+### 頻率代號
 
-### 2.1 基礎
+越下面的頻率越高，越需要做成腳本。
 
-| 功能 | 工具 | 腳本可獨立完成 | 驗證狀態 |
-|---|---|---|---|
-| 機器狀態、feeder 和吸嘴清單 | `get_status`、`list_feeders`、`list_nozzles` | ✅ | 真機 |
-| 歸零（含 enable） | `home_machine` | ✅ | 真機 |
-| 拋料 | `discard_part` | ✅ | 真機 |
-| 每個動作結束後自動抬回 Safe Z、失敗時回報吸嘴狀態 | 所有會動的工具 | ✅ | 真機 |
-| 動作紀錄 | `<configDir>/ai-bridge/actions.jsonl` | ✅ | 真機 |
-| 拍照、移動相機 | `capture_camera`、`move_camera` | ✅ | 真機 |
+| 代號 | 多久做一次 |
+|---|---|
+| **M** | 每台機器一次（或改硬體時） |
+| **P** | 每種封裝一次（例如 C0603 調一次，所有 0603 電容都適用） |
+| **R** | 每捲料、每次換料或移動料帶 |
+| **J** | 每種板子（每個 job）一次 |
+| **B** | 每批板子（每次放上新板） |
+| **N** | **每顆零件**（每次放料） |
+| **E** | 出錯時 |
 
-### 2.2 Feeder
+### 由誰做
 
-| 功能 | 工具 | 腳本可獨立完成 | 驗證狀態 |
-|---|---|---|---|
-| 散料 feeder 試吸並放回 | `inspect_feeder`、`pick_from_feeder` | ✅ | 真機（AD608） |
-| 拍一張照片就建立 strip feeder（找定位孔、零件、送料方向） | `setup_strip_feeder` | ✅ | 真機（1uF） |
-| **QR 標籤自動建立／更新 strip feeder** | `scan_qr_feeders`、`scan_feeders.py` | ✅ | 真機試跑；**還沒正式寫入**（apply） |
-| 用真空感測量取料高度 Z | `probe_feeder_z` | ✅（門檻以空中讀值為基準） | 真機（1uF 量到 8.15） |
-| 啟用、停用 feeder，設定 strip feeder 的 Z | `update_feeder` | ✅ | 真機 |
-| QR 標籤列印檔（8 mm、容錯 H、上方印零件名稱） | scratchpad 的 `qr_labels.py` | ✅ | 已印出並在真機讀到 |
+| 代號 | 意思 |
+|---|---|
+| ✅ | 已經是程式，判斷不需要 AI。目前大多透過 Claude 呼叫，只有 `scan_feeders.py` 可以單獨用命令列執行 |
+| 🤖 | 目前要 AI 看圖或判斷 |
+| 👤 | 一定要人做，或目前在 OpenPnP GUI 裡由人做 |
+| ❌ | 還沒做 |
 
-### 2.3 視覺與放料
+### 2.1 機器設定（M）
 
-| 功能 | 工具 | 腳本可獨立完成 | 驗證狀態 |
-|---|---|---|---|
-| 測底部視覺：吸著零件拍照，可以暫時換門檻，回傳影像 | `test_bottom_vision` | 量測 ✅；**選門檻目前要 AI 看圖** | 真機（C0603 門檻 180） |
-| 照 job 放料（OpenPnP 自己的 job processor） | `place_from_job` | ✅ | 真機（AD608 × 4、1uF × 4） |
-| feeder 缺料時自動換下一個 feeder | `place_from_job` | ✅ | 真機 |
-| 底部視覺退件後自動吸下一顆（連續失敗 5 顆就停） | `place_from_job` | ✅ | 真機 |
-| 列出 job 裡的板子和 placement | `list_job_placements` | ✅ | 真機 |
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| 相機、吸嘴、Safe Z、拋料位置等基本設定 | M | 👤 | OpenPnP GUI | — |
+| 歸零（含 enable） | 每次開機 | ✅ | `home_machine` | 真機 |
+| 每個動作結束後自動抬回 Safe Z、失敗時回報吸嘴狀態 | 每次動作 | ✅ | 所有會動的工具 | 真機 |
+| 全景圖 | M（工作台改裝時） | ✅ | `scan_bed_map`、`get_bed_map` | 真機 |
 
-### 2.4 驗收
+### 2.2 封裝與零件設定（P）
 
-| 功能 | 工具 | 腳本可獨立完成 | 驗證狀態 |
-|---|---|---|---|
-| 放置前先拍照，驗收時比對前後照片（任何顏色的零件都適用） | `place_from_job`（預設開啟）、`inspect_placements` | ✅ 判定為 `ok`、`check`、`missing` | 真機（C0603）；**IC 和電阻還沒測** |
-| 預設只回傳不合格的照片（省 token） | `inspect_placements(images=…)` | ✅ | 真機 |
-| 空板參考照：已經有零件的位置就跳過不放 | `survey_bare_boards`、`place_from_job` | ✅ | 真機（擋下了重複放置） |
-| 旁邊零件被撞歪也會回報 | `inspect_placements` | ✅ | 合成影像；真機抓到被震走的電容 |
-| 舊方法：找暗色本體（只適合 IC） | `inspect_placements`（沒有前後照片時） | 判定為 `unverified`，要人或 AI 看圖 | 真機（AD608） |
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| footprint、相容吸嘴頭 | P | 👤／🤖（照抄類似封裝） | 改 `packages.xml` | C0603、SOP-16 |
+| 零件高度 | 每個零件一次 | 👤 | 改 `parts.xml`（目前只有 1uF 設了） | — |
+| **底部視覺門檻** | P | ✅ 量測；**🤖 選門檻** | `test_bottom_vision` → 建立封裝專用設定 | C0603（門檻 180） |
 
-### 2.5 全景圖
+### 2.3 料帶與 feeder（R）
 
-| 功能 | 工具 | 驗證狀態 |
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| 印 QR 標籤 | 每捲料一次 | ✅ | scratchpad 的 `qr_labels.py` | 已印出並讀到 |
+| 把料帶放上料帶架 | R | 👤 | — | — |
+| **讀 QR、找料帶、建立或更新 strip feeder** | R | ✅ | `scan_qr_feeders`、`scan_feeders.py` | 真機試跑；**還沒正式寫入** |
+| 量取料高度 Z | R（新料帶架或新料帶時） | ✅（目前要個別呼叫） | `probe_feeder_z` | 1uF（8.15） |
+| 試吸一顆 | R | ✅（目前要個別呼叫） | `pick_from_feeder`、`discard_part` | 真機 |
+| 啟用 feeder | R | ✅ | `update_feeder` | 真機 |
+| 只拍一張照片建立 strip feeder（不用 QR） | R | ✅ | `setup_strip_feeder` | 1uF |
+| 散料 feeder 試吸並放回 | R | ✅ | `inspect_feeder`、`pick_from_feeder` | AD608 |
+
+### 2.4 板子設計（J）
+
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| 匯入電路板檔案、建立 job 和拼板、設定 fiducial | J | 👤 | OpenPnP GUI | fm_pnp |
+| 選要放哪些零件（啟用 placement） | J | 👤 | OpenPnP GUI | — |
+| **放料順序：先矮後高** | J | ❌（目前要人記得） | — | — |
+| 列出 job 裡的板子和 placement | J | ✅（但很耗 token，一次約 16k） | `list_job_placements` | 真機 |
+
+### 2.5 每批板子（B）
+
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| 放上新板子 | B | 👤 | — | — |
+| fiducial 檢查 | B | ✅（放料和驗收時自動做） | — | 真機 |
+| 空板參考照 | B | ✅（目前要個別呼叫） | `survey_bare_boards` | 真機 |
+| 把整批串起來：放料 → 驗收 → 報告 | B | ❌（**目前由 AI 一步一步呼叫**） | 規劃中的 `run_job.py` | — |
+
+### 2.6 每顆零件（N）：已經全部是程式
+
+| 步驟 | 頻率 | 現況 | 工具／做法 | 驗證 |
+|---|---|---|---|---|
+| 放之前拍照，跟空板照比對，已經有零件就跳過 | N | ✅ | `place_from_job`（預設開啟） | 真機 |
+| 吸料、底部視覺、放料（OpenPnP 的 job processor） | N | ✅ | `place_from_job` | AD608 × 4、1uF × 4 |
+| feeder 缺料時換下一個 feeder | N | ✅ | `place_from_job` | 真機 |
+| 底部視覺退件後吸下一顆（連續 5 顆失敗就停） | N | ✅ | `place_from_job` | 真機 |
+| 驗收：比對放置前後的照片，判定 `ok`、`check`、`missing`，也會回報旁邊零件被撞歪 | N | ✅ | `inspect_placements` | C0603；**IC、電阻還沒測** |
+| 只回傳不合格的照片 | N | ✅ | `inspect_placements(images="failures")` | 真機 |
+| 沒有放置前照片時，找暗色本體（只適合 IC） | N | 🤖（判定為 `unverified`，要看圖） | `inspect_placements` | AD608 |
+
+### 2.7 出錯時（E）
+
+| 步驟 | 現況 | 說明 |
 |---|---|---|
-| 掃描整個工作台並拼接、從原始照片重新拼出指定區域和解析度 | `scan_bed_map`、`get_bed_map` | 真機（視差在 feeder 和電路板這一層影響不大） |
+| 查失敗原因 | 🤖 | 先查 [knowledge/troubleshooting.md](../knowledge/troubleshooting.md)；照片都存在 `ai-bridge/inspect/`、`scan/`、`captures/` |
+| 需要動手處理（換料、扶正零件、料帶放反、吸嘴上還有零件） | 👤 | 工具會回報 `nozzlesAfterFailure`、`skippedOccupied`、料帶方向錯誤等 |
+| 動作紀錄 | ✅ | `<configDir>/ai-bridge/actions.jsonl` |
 
-### 2.6 這段期間改過的真機設定（都有備份）
+### 2.8 從頻率來看，哪些最需要做成腳本
+
+1. **B（每批板子）**：每一顆零件（N）的動作都已經是程式了，但**把它們串起來的還是 AI**，每批都要花 token。→ **`run_job.py` 是第一優先**。
+2. **R（每次換料）**：讀 QR、量 Z、試吸、啟用都已經有工具，但要一個一個呼叫。→ 把它們串進 `scan_feeders.py`。
+3. **J（每種板子）**：「先矮後高」的排序可以從零件高度自動算出來，不需要人記。
+4. **P（每種封裝）**：調底部視覺門檻的頻率較低，但目前要 AI 看圖。→ 寫成 `tune_bottom_vision.py`，只有在找不到可用範圍時才交給 AI。
+5. **M**：頻率最低，維持人在 GUI 裡做就好。
+
+### 2.9 這段期間改過的真機設定
+
+設定資料夾從 2026-10-16 起用 git 管理，歷史可以用 `git -C %USERPROFILE%\.openpnp2 log` 查。
 
 - N2 的 dynamic safe Z 關閉（吸 AD608 時會超出 Safe Zone）。
 - SOP-16 footprint 轉 −90°；`fm_pnp.job.xml` 的拼板開啟 fiducial 檢查。
 - C0603 封裝照 R0603 設定；C0603-1uF 高度 0.8 mm。
 - **底部視覺設定 `C0603`**（門檻 180），指派給 C0603 封裝；預設設定維持 240。
 - `C0603-1uF strip`：Z 8.15，已啟用。
+
+### 2.10 Token 用量分析
+
+`python ai-bridge/token_usage.py [session.jsonl] [--since 時間]` 會讀取 Claude Code 的對話紀錄（`~/.claude/projects/<專案>/*.jsonl`），把每次呼叫模型的用量分攤到各個工具上：
+- 工具結果算在下一次呼叫的「新輸入」裡。
+- 模型呼叫工具時寫出的內容算在「輸出」裡。
+
+2026-10-12 到 10-16 這個對話（873 次呼叫）的結果：
+
+| 工具 | 平均每次（token） |
+|---|---|
+| `get_status`、`home_machine` | 300–450 |
+| `place_from_job` | 約 1,100 |
+| `scan_qr_feeders`、`probe_feeder_z` | 約 1,000 |
+| `test_bottom_vision`（3 張照片） | 約 3,200 |
+| `inspect_placements`（附照片時） | 約 3,800 |
+| `list_job_placements`（88 個 placement） | 約 16,000 |
+
+- 總計：新輸入 295 萬、輸出 68 萬、**讀快取 2.67 億**。每次呼叫都會把整段對話重新讀一遍，讀快取單價雖然只有新輸入的約十分之一，但換算下來仍然是新輸入的 9 倍左右。
+- 所以：**最貴的不是單一工具，而是由 AI 一步一步呼叫、把對話越拉越長。** 用腳本跑完整個流程，是省最多的方法。另外，一個任務做完就開新對話（`/clear`）。
 
 ## 3. 已知問題與發現
 
