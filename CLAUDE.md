@@ -1,7 +1,9 @@
 # OpenPnP（實驗室 fork）
 
 這是 OpenPnP 原始碼，外加讓 Claude 透過 MCP 操作 OpenPnP 的 AI bridge。
-完整背景見 [ai-bridge/AI_BRIDGE_PLAN.md](ai-bridge/AI_BRIDGE_PLAN.md)，每天做了什麼見 [worklog/](worklog/)。
+完整背景見 [ai-bridge/AI_BRIDGE_PLAN.md](ai-bridge/AI_BRIDGE_PLAN.md)，目前進度和未來規劃見 [ai-bridge/ROADMAP.md](ai-bridge/ROADMAP.md)，每天做了什麼見 [worklog/](worklog/)。
+
+**原則：能用腳本的就用腳本，腳本失敗時才由 AI 接手。** 新功能要寫成不需要 AI 判斷的程式，並輸出結構化的結果、存下照片；AI 負責查失敗原因、修改程式或參數，以及抽查。
 
 - 使用者溝通用繁體中文。
 - 機器：Opulo LumenPnP，Marlin 韌體，GcodeDriver，上下各一台 USB 相機（`OpenPnpCaptureCamera`）。
