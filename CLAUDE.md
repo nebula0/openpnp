@@ -39,4 +39,5 @@ VS Code 的 Java 擴充功能會把 class 編譯到同一個 `target/classes`，
 - `reason` 要寫清楚為什麼做這個動作，它會進入動作紀錄。
 - 操作失敗時，先看 `nozzlesAfterFailure`，吸嘴上可能還留著零件，要告訴使用者。
 - 不要直接修改執行中 OpenPnP 的 XML 設定檔，OpenPnP 結束時會覆寫它。
+- 每次 commit 之後都要 `git push origin ai-bridge`（GitHub `nebula0/openpnp`，fine-grained token 約 2027-01-10 到期）。推送失敗時要告訴使用者。
 - 只有重要改動才在 `worklog/YYYY-MM-DD.md` 補紀錄：程式碼或設定的修改、新功能、新發現的問題或異常結果。例行的成功操作（例如照常 pick 再放回）不用寫，動作紀錄 `actions.jsonl` 已經有了。
