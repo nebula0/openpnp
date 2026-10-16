@@ -38,7 +38,7 @@
 1. **先問使用者兩件事**：板上那 4 顆乾放的 C6 要不要拿掉；1uF 料帶的上膜撕完了沒有。
 2. 1uF 撕完膜後：`python ai-bridge/scan_feeders.py --y 199.5 --from 115 --to 165 --step 8 --apply --verify-all --yes`，1uF 通過後要手動啟用（`--verify-all` 不會改已有 feeder 的啟用狀態）。
 3. 板子清空後才做要重啟的 Java 工作（ROADMAP 4.5）：相機路徑漂移的根本解、掃描時認出上膜。
-4. 不用重啟的：`lookup_parts.py`（ROADMAP 4.5）、查放置的系統性偏移（X +0.08、Y −0.16 mm，ROADMAP 3）。
+4. 不用重啟的：查放置的系統性偏移（X +0.08、Y −0.16 mm，ROADMAP 3）。`lookup_parts.py` 已完成。
 5. 新的 MCP 工具（`list_parts`、`update_part`、`update_package`）要使用者打 `/mcp` 才看得到；看不到時可以直接用 HTTP（見各腳本的 `call`）。
 
 ## 3. 要記得的事
