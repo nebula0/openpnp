@@ -1,4 +1,4 @@
-# 下一個對話的交接（2026-10-16）
+# 下一個對話的交接（2026-10-16 晚上更新）
 
 > 給接手的 Claude：這份是上一個對話結束時的狀態和接下來要做的事。`CLAUDE.md` 會自動載入，裡面有操作規則（會移動機器的工具要先拿 plan 再問、每次 commit 後都要 push 等），一定要遵守。
 > 背景資料：[ROADMAP.md](ROADMAP.md)（進度、依流程分類的功能表、已知問題）、[../knowledge/](../knowledge/)（疑難排解、驗證過的數值）、[../worklog/](../worklog/)（每天的細節，需要時再查，不用全部讀）。
@@ -31,10 +31,15 @@
 - 用法見檔案開頭。之後可以補：`--stop-on-check`、`--sim` 實測、AD608 那組（要先把 AD608 放回散料 feeder）。
 - **板上有 4 顆乾放的 C6（10/16 18:05）**：不要重啟或歸零，先問使用者要不要拿掉。
 
-### 2.3 之後（見 ROADMAP 4.2）
+### 2.3 腳本：`scan_feeders.py --verify`、`tune_bottom_vision.py`、統一報告（`report.py`）都已完成（10/16）
 
-- `scan_feeders.py` 擴充：寫入 feeder 之後，接著自動量 Z、試吸、測底部視覺，全部通過才啟用。
-- Java 端新增設定封裝視覺參數、設定零件高度的 API，然後寫 `tune_bottom_vision.py`。
+### 2.4 接下來（依序）
+
+1. **先問使用者兩件事**：板上那 4 顆乾放的 C6 要不要拿掉；1uF 料帶的上膜撕完了沒有。
+2. 1uF 撕完膜後：`python ai-bridge/scan_feeders.py --y 199.5 --from 115 --to 165 --step 8 --apply --verify-all --yes`，1uF 通過後要手動啟用（`--verify-all` 不會改已有 feeder 的啟用狀態）。
+3. 板子清空後才做要重啟的 Java 工作（ROADMAP 4.5）：相機路徑漂移的根本解、掃描時認出上膜。
+4. 不用重啟的：`lookup_parts.py`（ROADMAP 4.5）、查放置的系統性偏移（X +0.08、Y −0.16 mm，ROADMAP 3）。
+5. 新的 MCP 工具（`list_parts`、`update_part`、`update_package`）要使用者打 `/mcp` 才看得到；看不到時可以直接用 HTTP（見各腳本的 `call`）。
 
 ## 3. 要記得的事
 
@@ -44,3 +49,5 @@
 - strip feeder 試吸後不能放回料帶，只能 `discard_part`。
 - 改了 `server.py` 之後，要請使用者打 `/mcp` 重新連線。
 - 使用者希望：能用腳本做的都用腳本，腳本失敗時才由 AI 接手。新功能要輸出結構化的結果、存下照片。
+- 10/16 起使用者授權：**動真機不用每次問**，使用者沒回時照 ROADMAP 繼續做（記憶 `real-machine-no-confirm`）。歸零前還是要說一聲。
+- OpenPnP 可以用 PowerShell `CloseMainWindow()` 正常關閉（會存檔、自動 commit），再用 `start-openpnp.bat` 背景啟動。
