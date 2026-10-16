@@ -56,6 +56,12 @@ public class StripTapeLocator {
      * How far measured holes may be off the ideal line and pitch.
      */
     public static final double TOLERANCE = 0.3;
+    /**
+     * Least fraction of a part, inside a margin, that is about as bright as the paper: its
+     * terminals or leads. Measured on 0603 capacitors under the top camera: parts 0.07-0.30,
+     * empty pockets 0.00 (28 of them).
+     */
+    public static final double MIN_BRIGHT_FRACTION = 0.02;
 
     public static class Result {
         public final List<Point> holes = new ArrayList<>();
@@ -257,10 +263,12 @@ public class StripTapeLocator {
             double length = Math.max(rect.size.width, rect.size.height) * mmPerPixel;
             double width = Math.min(rect.size.width, rect.size.height) * mmPerPixel;
             // A part lies on the paper, so a frame around it must be about as light as paper.
-            // That rules out the texture of the dark surroundings.
+            // That rules out the texture of the dark surroundings. An empty pocket is dark too,
+            // but has no bright terminals or leads in it.
+            org.opencv.core.Rect box = Imgproc.boundingRect(contour);
             if (length > 0.4 && length < 6 && width > 0.2
-                    && frameLevel(gray, Imgproc.boundingRect(contour),
-                            (int) Math.ceil(0.3 / mmPerPixel)) > 0.85 * paper) {
+                    && frameLevel(gray, box, (int) Math.ceil(0.3 / mmPerPixel)) > 0.85 * paper
+                    && brightFraction(gray, box, 0.85 * paper) >= MIN_BRIGHT_FRACTION) {
                 rects.add(rect);
             }
             contour.release();
@@ -285,6 +293,25 @@ public class StripTapeLocator {
             }
         }
         return found;
+    }
+
+    /**
+     * @return the fraction of the box, without a 15% margin on each side, that is at least the
+     *         given level.
+     */
+    static double brightFraction(Mat gray, org.opencv.core.Rect box, double level) {
+        int dx = (int) (box.width * 0.15);
+        int dy = (int) (box.height * 0.15);
+        if (box.width - 2 * dx <= 0 || box.height - 2 * dy <= 0) {
+            return 0;
+        }
+        Mat inner = gray.submat(new org.opencv.core.Rect(box.x + dx, box.y + dy,
+                box.width - 2 * dx, box.height - 2 * dy));
+        Mat bright = new Mat();
+        Imgproc.threshold(inner, bright, level, 255, Imgproc.THRESH_BINARY);
+        double fraction = Core.countNonZero(bright) / (double) inner.total();
+        bright.release();
+        return fraction;
     }
 
     /**
