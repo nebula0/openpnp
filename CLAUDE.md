@@ -5,6 +5,8 @@
 
 **原則：能用腳本的就用腳本，腳本失敗時才由 AI 接手。** 新功能要寫成不需要 AI 判斷的程式，並輸出結構化的結果、存下照片；AI 負責查失敗原因、修改程式或參數，以及抽查。
 
+**經驗庫** [knowledge/](knowledge/)：腳本失敗、AI 接手時，先查 `knowledge/troubleshooting.md`（症狀 → 原因 → 先試什麼）和 `knowledge/known-good/`（驗證過的參數）。問題解決或量到新數值後，回來補充或修正。
+
 - 使用者溝通用繁體中文。
 - 機器：Opulo LumenPnP，Marlin 韌體，GcodeDriver，上下各一台 USB 相機（`OpenPnpCaptureCamera`）。
 - 真機設定：`%USERPROFILE%\.openpnp2`。模擬設定：`%USERPROFILE%\openpnp-sim`。
