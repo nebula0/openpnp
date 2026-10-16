@@ -16,3 +16,6 @@ hs_err*
 .vscode/
 /src/main/resources/org/openpnp/translations.properties.bak
 .DS_Store
+
+# run_job.py reports (with photos)
+ai-bridge/reports/

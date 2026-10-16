@@ -26,18 +26,10 @@
 
 ### 2.1 料帶：已完成（見 worklog 10/16）
 
-### 2.2 寫 `ai-bridge/run_job.py`（最優先的腳本）
+### 2.2 `run_job.py`：已完成（10/16，真機 4 顆 C6 一次通過）
 
-目標：跑一批板子不需要 AI。只用 Python 標準函式庫，透過 bridge 的 HTTP API 呼叫，可以參考 `scan_feeders.py` 的寫法：從 `bridge.json` 讀 token，先拿 plan，印出來後問 y/N，確認後才帶 confirm。
-
-1. `GET /status`。沒有歸零的話，提醒使用者確認路徑淨空，按 Enter 才 `POST /machine/home`。
-2. 參數：`--job`、`--boards`（預設全部啟用的板子）、`--placements`（預設全部啟用的 placement）、`--survey`（新板子時先拍空板參考照，`POST /job/survey`）、`--yes`、`--sim`。
-3. 依零件高度分組，**由矮到高**。高度是 0 的零件列出警告，排在最前面；`GET /job/placements` 已經直接回傳每個 placement 的 `partHeight`（10/16）。
-4. 每一組依序執行 `POST /job/place`（預設會先拍放置前的照片），**放完立刻** `POST /job/inspect`（`images: "none"`，或只存失敗的照片路徑）。
-5. 報告寫到 `ai-bridge/reports/<時間>.json`：每個 placement 的判定（`ok`／`check`／`missing`）和原因、照片路徑、`partsRejected`、`feedersDisabled`、`skippedOccupied`。終端機另外印出一份摘要。
-6. 出錯就停，把 `nozzlesAfterFailure` 和錯誤訊息寫進報告，並提示「把報告交給 AI」。
-7. 先在模擬機上測流程（`--sim`），再用真機放一組 C0603 測試。
-8. 用 `ai-bridge/token_usage.py` 比較：同樣一批板子，由 AI 一步一步呼叫和由腳本跑，各花多少 token。
+- 用法見檔案開頭。之後可以補：`--stop-on-check`、`--sim` 實測、AD608 那組（要先把 AD608 放回散料 feeder）。
+- **板上有 4 顆乾放的 C6（10/16 18:05）**：不要重啟或歸零，先問使用者要不要拿掉。
 
 ### 2.3 之後（見 ROADMAP 4.2）
 
