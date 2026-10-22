@@ -1193,11 +1193,14 @@ public class AiBridgeServer {
                 : enabledElement.getAsBoolean();
         double zValue = getDouble(body, "z", Double.NaN);
         Double z = Double.isNaN(zValue) ? null : zValue;
-        if (enabled == null && z == null) {
-            throw new BadRequest("Give enabled and/or z.");
+        double rotationValue = getDouble(body, "rotationInTape", Double.NaN);
+        Double rotationInTape = Double.isNaN(rotationValue) ? null : rotationValue;
+        if (enabled == null && z == null && rotationInTape == null) {
+            throw new BadRequest("Give enabled, z and/or rotationInTape.");
         }
-        if (z != null && !(feeder instanceof ReferenceStripFeeder)) {
-            throw new BadRequest("Setting z is only supported for ReferenceStripFeeder so far.");
+        if ((z != null || rotationInTape != null) && !(feeder instanceof ReferenceStripFeeder)) {
+            throw new BadRequest(
+                    "Setting z or rotationInTape is only supported for ReferenceStripFeeder so far.");
         }
         JsonObject o = ok();
         o.addProperty("feederId", feeder.getId());
@@ -1208,6 +1211,9 @@ public class AiBridgeServer {
                                                                 .convertToUnits(
                                                                         LengthUnit.Millimeters);
             o.addProperty("zBefore", round(reference.getZ()));
+            o.addProperty("rotationInTapeBefore",
+                    round(((ReferenceStripFeeder) feeder).getLocation()
+                                                         .getRotation()));
         }
         onSwing(() -> {
             if (z != null) {
@@ -1218,6 +1224,11 @@ public class AiBridgeServer {
                                      .convertToUnits(LengthUnit.Millimeters);
                 strip.setReferenceHoleLocation(reference.derive(null, null, z, null));
                 strip.setLastHoleLocation(last.derive(null, null, z, null));
+            }
+            if (rotationInTape != null) {
+                ReferenceStripFeeder strip = (ReferenceStripFeeder) feeder;
+                strip.setLocation(strip.getLocation()
+                                       .derive(null, null, null, rotationInTape));
             }
             if (enabled != null) {
                 feeder.setEnabled(enabled);
@@ -1230,6 +1241,9 @@ public class AiBridgeServer {
         o.addProperty("enabled", feeder.isEnabled());
         if (z != null) {
             o.addProperty("z", round(z));
+        }
+        if (rotationInTape != null) {
+            o.addProperty("rotationInTape", round(rotationInTape));
         }
         logAction("feeder/update", body, o);
         return o;
@@ -2925,12 +2939,15 @@ public class AiBridgeServer {
      * The labels are stuck on the strips, so the strip runs on from under its label: the first
      * photo of the strip is tapeOffset beside the label center (along y, default -14, i.e.
      * below), and while it shows no parts yet (used pockets), further photos follow every 8 mm
-     * up to searchLength (default 80) mm on. The feed has to run away from the label, a strip
-     * turned the other way round is reported.
+     * up to searchLength (default 80) mm on. A strip turned the other way round (sprocket holes
+     * on the other side) feeds towards its label: it is followed on to its far end, up to
+     * stripLength (default 250) mm from the label, and picked from there back towards the
+     * label, as turning a cut strip round spills its parts.
      *
      * Body: {y (the row of label centers), xFrom, xTo, step (default 10), yTolerance (labels
      * may be this far off y, default 4: rows of photos 2 mm apart), tapeOffset (default -14),
-     * searchLength (default 80), tapeWidth (default 8), z (the tape surface, for new
+     * searchLength (default 80), stripLength (default 250), tapeWidth (default 8), z (the tape
+     * surface, for new
      * feeders without a similar one; default the Z of a strip feeder of the same package),
      * apply (default false), confirm}
      */
@@ -2955,6 +2972,7 @@ public class AiBridgeServer {
             rowOffsets[2 * k] = yTolerance * k / sideRows;
         }
         double searchLength = Math.min(200, Math.abs(getDouble(body, "searchLength", 80)));
+        double stripLength = Math.min(400, Math.abs(getDouble(body, "stripLength", 250)));
         double tapeWidth = getDouble(body, "tapeWidth", 8);
         double givenZ = getDouble(body, "z", Double.NaN);
         boolean apply = getBoolean(body, "apply", false);
@@ -3070,7 +3088,8 @@ public class AiBridgeServer {
                     // Anywhere along the strip, which runs on from the label.
                     double along = (hole.getY() - f[1]) * Math.signum(tapeOffset);
                     if (s.getPart() == part && Math.abs(hole.getX() - f[0]) < tapeWidth
-                            && along > -20 && along < searchLength + 20) {
+                            && along > -20
+                            && along < Math.max(searchLength, stripLength) + 20) {
                         existing = s;
                     }
                     if (s.getPart() != null && s.getPart()
@@ -3130,13 +3149,26 @@ public class AiBridgeServer {
                             + "photo: " + why);
                     continue;
                 }
-                if (tape.direction.y * direction < 0.5) {
+                if (tape.direction.y * direction <= -0.5) {
+                    // Turned round: the parts are taken towards the label, so start with the
+                    // part furthest from it.
+                    double startY = camera.getLocation()
+                                          .convertToUnits(LengthUnit.Millimeters)
+                                          .getY();
+                    StripTapeLocator.Result far = farEndOfStrip(camera, f[0], startY,
+                            direction, f[1] + tapeOffset + direction * stripLength, z,
+                            tapeWidth);
+                    if (far != null) {
+                        tape = far;
+                    }
+                    r.addProperty("turnedRound", true);
+                }
+                else if (tape.direction.y * direction < 0.5) {
                     r.addProperty("status", "error");
-                    r.addProperty("error", "The strip feeds towards its label (direction "
-                            + round(Math.toDegrees(
+                    r.addProperty("error", "The strip does not run away from its label "
+                            + "(direction " + round(Math.toDegrees(
                                     Math.atan2(tape.direction.y, tape.direction.x)))
-                            + " degrees): turn it round, so that the parts are taken in order "
-                            + "away from the label.");
+                            + " degrees).");
                     continue;
                 }
                 r.addProperty("holesFound", tape.holes.size());
@@ -3234,6 +3266,48 @@ public class AiBridgeServer {
             o.addProperty("applied", apply);
             return o;
         });
+    }
+
+    /**
+     * Follows a strip from startY away from its label (direction +1 or -1 along y) in photos 8
+     * mm apart, until no sprocket holes show (the end of the strip), the camera cannot go on, or
+     * endY. Runs on the machine thread.
+     *
+     * @return the strip as seen in the last photo with parts, i.e. with the part furthest from
+     *         the label as its first part when it feeds towards the label; null if none had
+     *         parts.
+     */
+    private StripTapeLocator.Result farEndOfStrip(Camera camera, double stripX, double startY,
+            double direction, double endY, double z, double tapeWidth) {
+        StripTapeLocator.Result last = null;
+        for (double y = startY + direction * 8; (endY - y) * direction >= 0;
+                y += direction * 8) {
+            try {
+                MovableUtils.moveToLocationAtSafeZ(camera,
+                        camera.getLocation()
+                              .convertToUnits(LengthUnit.Millimeters)
+                              .derive(stripX, y, null, null));
+            }
+            catch (Exception e) {
+                // E.g. beyond a soft limit.
+                break;
+            }
+            try {
+                StripTapeLocator.Result t = locateStripNear(camera, stripX, z, tapeWidth);
+                if (!t.parts.isEmpty()) {
+                    last = t;
+                }
+            }
+            catch (StripTapeLocator.NoPartsException
+                    | StripTapeLocator.NoHoleBeyondFirstPartException e) {
+                // Still on the strip.
+            }
+            catch (Exception e) {
+                // No holes in a line: past the end of the strip.
+                break;
+            }
+        }
+        return last;
     }
 
     /**

@@ -95,6 +95,15 @@ public class StripTapeLocator {
     }
 
     /**
+     * The holes were found, but no parts beside them: used pockets, or none in view.
+     */
+    public static class NoPartsException extends Exception {
+        public NoPartsException(String message) {
+            super(message);
+        }
+    }
+
+    /**
      * Converts image pixels to machine millimeters.
      */
     public interface PixelToMachine {
@@ -130,7 +139,7 @@ public class StripTapeLocator {
             }
         }
         if (r.parts.isEmpty()) {
-            throw new Exception("Found the holes but no parts " + lateral
+            throw new NoPartsException("Found the holes but no parts " + lateral
                     + " mm beside them. Make sure at least one part is in view.");
         }
         // The side of the parts, all parts must agree.
