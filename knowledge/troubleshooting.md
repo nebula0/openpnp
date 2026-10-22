@@ -40,6 +40,11 @@
 
 ## 量取料高度（`probe_feeder_z`）
 
+### `No part vacuum-detected after pick`，零件還留在口袋裡
+- 原因（10/22，1uF）：取料 Z 太高 0.05 mm。feeder 存的是 8.25，`probe_feeder_z` 在 8.25 量到 −6635（只是碰到，沒有密合，門檻是 −6900），8.2 才跳到 −7600。差 0.05 mm 就吸不起來。
+- 先試：先拍取料點，確認零件還在、XY 有對準。再跑 `probe_feeder_z`（不用 apply），用 `update_feeder` 把 Z 設成 contactZ − 0.05。上膜沒撕也是同樣的症狀，兩個都要檢查。
+- 注意：`scan_qr_feeders` 會沿用 feeder 原本的 Z，不會重量。料帶重新放過之後，最好每條都跑一次 `probe_feeder_z`。
+
 ### `The vacuum level ... is too close to the contact threshold`
 - 10/16 起真空讀兩個位元組，數值是負的、約 256 倍大（空中約 −6560）。舊的 `contact_drop=2` 現在只是雜訊；N045 不給 `contact_drop` 就會用吸嘴頭的 part-on 上限（−6900）。其他吸嘴頭要先用 `read_nozzle_vacuum` 量空的和有零件的讀值，設好 part-on 範圍。
 - 原因：吸嘴頭設定的 part on/off 真空範圍是沒用過的預設值，不適合這個吸嘴頭。N045 的空中讀值是 229–230，比設定的「沒零件」範圍 248–255 還低。
