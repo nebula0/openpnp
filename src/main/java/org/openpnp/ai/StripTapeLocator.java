@@ -40,7 +40,8 @@ import org.opencv.imgproc.Imgproc;
  * ReferenceStripFeeder expects the parts to the left of the line from the reference hole to the
  * last hole, and the first part 2 mm (half a hole pitch) before the reference hole, i.e. on the
  * side away from the last hole. The feed direction therefore follows from the side the parts
- * are on.
+ * are on, unless a feed direction is given: then a strip turned round has its parts on the right,
+ * for a feeder with turnedRound set.
  *
  * All locations are machine millimeters, with y up.
  */
@@ -70,6 +71,11 @@ public class StripTapeLocator {
          * Unit vector of the feed direction.
          */
         public Point direction;
+        /**
+         * The parts are on the right of the feed direction: the strip lies turned round (see
+         * ReferenceStripFeeder.isTurnedRound()).
+         */
+        public boolean turnedRound;
         public Point referenceHole;
         public Point lastHole;
         public Point firstPart;
@@ -118,6 +124,16 @@ public class StripTapeLocator {
      */
     public static Result locate(Mat gray, double tapeWidth, double mmPerPixel,
             PixelToMachine toMachine) throws Exception {
+        return locate(gray, tapeWidth, mmPerPixel, toMachine, null);
+    }
+
+    /**
+     * @param feed the wanted feed direction in machine coordinates, e.g. away from the strip's
+     *        label; the parts may then be on either side of the holes (turnedRound if on the
+     *        right). Null: the parts must be on the left, which fixes the feed direction.
+     */
+    public static Result locate(Mat gray, double tapeWidth, double mmPerPixel,
+            PixelToMachine toMachine, Point feed) throws Exception {
         Result r = new Result();
         List<Point> holes = findHoles(gray, mmPerPixel, toMachine);
         List<Point> line = bestLine(holes);
@@ -149,17 +165,24 @@ public class StripTapeLocator {
                 throw new Exception("Parts were found on both sides of the hole line.");
             }
         }
-        // The parts must be on the left of the feed direction d, left(d) = (-d.y, d.x), so
-        // cross(d, part) > 0.
-        r.direction = side > 0 ? u : new Point(-u.x, -u.y);
+        // Normally the parts are on the left of the feed direction d, left(d) = (-d.y, d.x), so
+        // cross(d, part) > 0. With a wanted feed direction, a strip turned round has them on
+        // the right.
+        if (feed != null) {
+            r.direction = dot(u, feed) >= 0 ? u : new Point(-u.x, -u.y);
+            r.turnedRound = Math.signum(cross(r.direction, sub(r.parts.get(0), origin))) < 0;
+        }
+        else {
+            r.direction = side > 0 ? u : new Point(-u.x, -u.y);
+        }
         Point d = r.direction;
-        Point left = new Point(-d.y, d.x);
+        Point towardsParts = r.turnedRound ? new Point(d.y, -d.x) : new Point(-d.y, d.x);
 
         r.parts.sort(Comparator.comparingDouble(p -> dot(d, p)));
         r.holes.sort(Comparator.comparingDouble(p -> dot(d, p)));
         r.firstPart = r.parts.get(0);
         // The first part is half a pitch before its reference hole.
-        Point expected = add(sub(r.firstPart, scale(left, lateral)),
+        Point expected = add(sub(r.firstPart, scale(towardsParts, lateral)),
                 scale(d, REFERENCE_HOLE_TO_PART_LINEAR));
         r.referenceHole = nearest(r.holes, expected);
         if (distance(r.referenceHole, expected) > TOLERANCE * 2) {

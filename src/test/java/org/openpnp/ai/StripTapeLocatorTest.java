@@ -1,7 +1,9 @@
 package org.openpnp.ai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.File;
 import java.nio.file.Files;
@@ -82,11 +84,22 @@ public class StripTapeLocatorTest {
             double along = 2 + 4 * i;
             Point center = toPixel(start.x + u.x * along + n.x * 3.5,
                     start.y + u.y * along + n.y * 3.5);
-            Point[] p = new Point[4];
-            new RotatedRect(center, new Size(80, 160), -angle).points(p);
-            Imgproc.fillConvexPoly(image, new MatOfPoint(p), new Scalar(130));
+            // A dark pocket edge, a gray body and bright terminals at its ends, across the tape.
+            fillRect(image, center, new Size(95, 175), angle, 40);
+            fillRect(image, center, new Size(80, 160), angle, 130);
+            for (int end : new int[] {-1, 1}) {
+                Point terminal = new Point(center.x + n.x * 65 * end, center.y - n.y * 65 * end);
+                fillRect(image, terminal, new Size(80, 30), angle, 240);
+            }
         }
         return image;
+    }
+
+    private static void fillRect(Mat image, Point center, Size size, double angle,
+            double level) {
+        Point[] p = new Point[4];
+        new RotatedRect(center, size, -angle).points(p);
+        Imgproc.fillConvexPoly(image, new MatOfPoint(p), new Scalar(level));
     }
 
     /**
@@ -98,6 +111,7 @@ public class StripTapeLocatorTest {
                 new Location(LengthUnit.Millimeters, r.referenceHole.x, r.referenceHole.y, 0, 0));
         feeder.setLastHoleLocation(
                 new Location(LengthUnit.Millimeters, r.lastHole.x, r.lastHole.y, 0, 0));
+        feeder.setTurnedRound(r.turnedRound);
         feeder.setPartPitch(new Length(r.partPitch, LengthUnit.Millimeters));
         for (int i = 0; i < r.parts.size(); i++) {
             feeder.setFeedCount(i + 1);
@@ -119,6 +133,41 @@ public class StripTapeLocatorTest {
         assertEquals(4, r.partPitch, 1e-9);
         // Parts on +x means feeding towards -y.
         assertEquals(-1, r.direction.y, 1e-3);
+        assertFeederPicksParts(r);
+    }
+
+    @Test
+    public void turnedRoundTapeFeedsAwayFromItsLabel() throws Exception {
+        // Parts on -x, but the label is above, so the feed must still run towards -y: the
+        // parts are then on the right, and the feeder must know the strip is turned round.
+        Mat image = tape(new Point(9, -2), new Point(0, -1), 3, 2, -1);
+        StripTapeLocator.Result r = StripTapeLocator.locate(image, 8, MM_PER_PIXEL,
+                StripTapeLocatorTest::toMachine, new Point(0, -1));
+        assertTrue(r.turnedRound);
+        assertEquals(-1, r.direction.y, 1e-3);
+        assertEquals(2, r.parts.size());
+        assertFeederPicksParts(r);
+        // Turned round, the parts lie the other way round, too.
+        ReferenceStripFeeder feeder = new ReferenceStripFeeder();
+        feeder.setReferenceHoleLocation(
+                new Location(LengthUnit.Millimeters, r.referenceHole.x, r.referenceHole.y, 0, 0));
+        feeder.setLastHoleLocation(
+                new Location(LengthUnit.Millimeters, r.lastHole.x, r.lastHole.y, 0, 0));
+        feeder.setFeedCount(1);
+        double normal = feeder.getPickLocation()
+                              .getRotation();
+        feeder.setTurnedRound(true);
+        assertEquals(180, Math.abs(feeder.getPickLocation()
+                                         .getRotation()
+                - normal), 1e-6);
+    }
+
+    @Test
+    public void wantedFeedAlongPartsOnTheLeftIsNotTurnedRound() throws Exception {
+        Mat image = tape(new Point(4, -2), new Point(0, -1), 3, 2, 1);
+        StripTapeLocator.Result r = StripTapeLocator.locate(image, 8, MM_PER_PIXEL,
+                StripTapeLocatorTest::toMachine, new Point(0, -1));
+        assertFalse(r.turnedRound);
         assertFeederPicksParts(r);
     }
 

@@ -113,6 +113,14 @@ public class ReferenceStripFeeder extends ReferenceFeeder {
     @Attribute(required = false)
     private boolean visionEnabled = true;
 
+    /**
+     * The strip lies turned round: its parts are on the other side of the sprocket holes, as
+     * seen along the feed, and turned by 180°. Lets a cut strip be fed from either end without
+     * turning it round, which spills its parts.
+     */
+    @Attribute(required = false)
+    private boolean turnedRound = false;
+
     @Element(required = false)
     private CvPipeline pipeline = createDefaultPipeline();
 
@@ -241,7 +249,7 @@ public class ReferenceStripFeeder extends ReferenceFeeder {
         // to the part in the tape
         Length x = getHoleToPartLateral().convertToUnits(l.getUnits());
         Length y = referenceHoleToPartLinear.convertToUnits(l.getUnits());
-        Point p = new Point(x.getValue(), y.getValue());
+        Point p = new Point(turnedRound ? -x.getValue() : x.getValue(), y.getValue());
 
         // Determine the angle that the tape is at. For historical reasons, our local coordinates are
         // rotated -90° (vertical tape with sprocket holes left). 
@@ -256,6 +264,9 @@ public class ReferenceStripFeeder extends ReferenceFeeder {
         if (isStandardEia481()) {
             // Angle with the sprocket holes on top, as per the EIA-481-C industry standard.  
             angle += 90;
+        }
+        if (turnedRound) {
+            angle += 180;
         }
         l = l.derive(null, null, null, angle + getLocation().getRotation());
 
@@ -700,6 +711,16 @@ public class ReferenceStripFeeder extends ReferenceFeeder {
     private void persist() {
         // Make sure the EIA-481 flag is initialized before persisting.
         isStandardEia481(); // using side effect
+    }
+
+    public boolean isTurnedRound() {
+        return turnedRound;
+    }
+
+    public void setTurnedRound(boolean turnedRound) {
+        boolean oldValue = this.turnedRound;
+        this.turnedRound = turnedRound;
+        firePropertyChange("turnedRound", oldValue, turnedRound);
     }
 
     public boolean isStandardEia481() {

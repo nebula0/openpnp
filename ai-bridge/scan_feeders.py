@@ -122,8 +122,6 @@ def main():
                              '(negative: the strip runs on below the label)')
     parser.add_argument('--search-length', type=float, default=80,
                         help='how far along the strip to look for the first part')
-    parser.add_argument('--strip-length', type=float, default=250,
-                        help='how far a strip turned round is followed to its far end')
     parser.add_argument('--z', type=float, help='tape surface Z for new feeders')
     parser.add_argument('--apply', action='store_true', help='update or add the feeders')
     parser.add_argument('--verify', action='store_true',
@@ -144,8 +142,7 @@ def main():
     config_dir = os.path.expanduser('~/openpnp-sim' if args.sim else '~/.openpnp2')
     body = {'y': args.y, 'xFrom': args.x_from, 'xTo': args.x_to, 'step': args.step,
             'yTolerance': args.y_tolerance,
-            'tapeOffset': args.tape_offset, 'searchLength': args.search_length,
-            'stripLength': args.strip_length, 'z': args.z,
+            'tapeOffset': args.tape_offset, 'searchLength': args.search_length, 'z': args.z,
             'apply': args.apply,
             'reason': 'scan_feeders.py: set up strip feeders from their QR labels'}
 
