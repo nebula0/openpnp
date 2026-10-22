@@ -42,8 +42,17 @@
 
 ### `No part vacuum-detected after pick`，零件還留在口袋裡
 - 原因（10/22，1uF）：取料 Z 太高 0.05 mm。feeder 存的是 8.25，`probe_feeder_z` 在 8.25 量到 −6635（只是碰到，沒有密合，門檻是 −6900），8.2 才跳到 −7600。差 0.05 mm 就吸不起來。
-- 先試：先拍取料點，確認零件還在、XY 有對準。再跑 `probe_feeder_z`（不用 apply），用 `update_feeder` 把 Z 設成 contactZ − 0.05。上膜沒撕也是同樣的症狀，兩個都要檢查。
-- 注意：`scan_qr_feeders` 會沿用 feeder 原本的 Z，不會重量。料帶重新放過之後，最好每條都跑一次 `probe_feeder_z`。
+- 先試：先拍取料點，確認零件還在、XY 有對準。再跑 `probe_feeder_z`（不用 apply），用 `update_feeder` 把 Z 設成 **contactZ − 0.15**。0.05 不夠：直接放在平台上的料帶不平，沿料帶每 8 mm 會差約 0.1 mm（10/22 的 330ohm：Y 300 在 7.45，Y 292 在 7.35）。吸嘴有彈簧，多壓 0.15 沒問題（10/22 用 −0.15 後，11 顆連續成功）。上膜沒撕也是同樣的症狀，兩個都要檢查。
+- 注意：`scan_qr_feeders` 會沿用 feeder 原本的 Z，不會重量。料帶重新放過之後，最好每條都跑一次 `probe_feeder_z`。10/22 料帶架上的三條，Z 都和存的值差 0.05–0.2 mm。
+
+### 第一顆放得好好的，第二顆 `No part vacuum-detected after pick`
+- 原因（10/22，100nF）：掃描找到的「第一顆」其實是之前 `pick_from_feeder` 試吸後放回去的那顆，它後面都是空口袋。掃描只要看到有零件就停，不會管後面是不是空的。
+- 先試：拍取料點附近的照片確認。重跑 `scan_qr_feeders`（apply），它會跳過已經空掉的口袋，找到下一段有料的地方。試吸時用 `return_part=false` 再丟掉，就不會留下單獨一顆。
+
+### 取料或放料時 `Can't move x to 433.5mm, higher than soft limit 433`
+- 原因：N1 在上相機左邊約 24.4 mm。相機能拍到 X 433，但 N1 只能取到 **X ≈ 408.6** 以內的零件。
+- 先試：料帶放在 X ≤ 405 以內。
+
 
 ### `The vacuum level ... is too close to the contact threshold`
 - 10/16 起真空讀兩個位元組，數值是負的、約 256 倍大（空中約 −6560）。舊的 `contact_drop=2` 現在只是雜訊；N045 不給 `contact_drop` 就會用吸嘴頭的 part-on 上限（−6900）。其他吸嘴頭要先用 `read_nozzle_vacuum` 量空的和有零件的讀值，設好 part-on 範圍。
