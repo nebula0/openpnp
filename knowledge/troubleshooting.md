@@ -87,6 +87,11 @@
 - 原因：上相機在 Y 方向只看得到約 10.6 mm，QR 就占了 8 mm。標籤偏離掃描的 Y 超過約 1.3 mm，就會被切掉。
 - 先試：加大 `y_tolerance`（預設 4，每排相差 2 mm），或把標籤貼得更整齊。照片有點失焦沒關係。
 
+### `scan_qr_feeders` 讀到 0 個標籤，但照片裡 QR 清清楚楚整個都在
+- 原因（10/22）：新的一批標籤 QR 比較小（約 6.5 mm，之前是 8 mm），格子小，失焦後糊掉。OpenCV 偵測得到 QR，但怎樣都解不出內容；zxing 在縮放到 600–1000 px 寬時讀得到。已修改：`QrLabelLocator` 會同時用兩種解碼器。
+- 先試：用 scratchpad 的小程式，拿 `ai-bridge/scan/` 的照片離線跑 `QrLabelLocator.find`，不用動機器就能試參數。標籤也可以印回 8 mm。
+- **不要用 `camera_properties` 改上相機的 Focus**：10/22 設成 `auto=false, value=5` 之後，Top 立刻斷線（紅色大叉），只能重啟 OpenPnP，而且 freeze 會把這個值存起來，下次開相機時又套用。發生時要先正常關閉 OpenPnP，把 `machine.xml` 裡的 Focus 改回 `auto="true"`、commit，再啟動。
+
 ### 料帶上的零件比 footprint 大很多
 - 原因：拿錯料（10/14：100 nF 那捲是 0805，板子上是 0603 的焊墊）。
 - 先試：從照片量零件本體的尺寸，跟空板照片裡的焊墊比較（`inspect/bare/`），再看料捲上的料號（三星 CL10 是 0603，CL21 是 0805）。
