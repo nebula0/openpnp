@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.opencv.core.Core;
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
 import org.opencv.core.Point;
@@ -66,6 +67,24 @@ public class QrLabelLocatorTest {
         assertEquals("C0603-100nF", labels.get(1).text);
         assertEquals(480, labels.get(0).center.x, 6);
         assertEquals(1450, labels.get(1).center.x, 6);
+    }
+
+    /**
+     * Labels of 2026-10-22: smaller codes stuck on turned by 90 degrees.
+     */
+    @Test
+    public void readsTurnedSmallLabel() {
+        Mat image = holder(new String[] {"C0603-1uF"}, new int[] {980}, 540, 15);
+        Core.rotate(image, image, Core.ROTATE_90_COUNTERCLOCKWISE);
+        Mat wide = new Mat(1083, 1923, CvType.CV_8UC1, new Scalar(25));
+        image.submat(new Rect((image.cols() - 1083) / 2, (image.rows() - 1083) / 2, 1083, 1083))
+             .copyTo(wide.submat(new Rect(420, 0, 1083, 1083)));
+        List<QrLabelLocator.Label> labels = QrLabelLocator.find(wide);
+        assertEquals(1, labels.size());
+        assertEquals("C0603-1uF", labels.get(0).text);
+        assertEquals(960, labels.get(0).center.x, 8);
+        assertEquals(522, labels.get(0).center.y, 8);
+        assertEquals(90, labels.get(0).angle, 3);
     }
 
     @Test
