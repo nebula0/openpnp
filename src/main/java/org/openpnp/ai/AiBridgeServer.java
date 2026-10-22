@@ -54,6 +54,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
@@ -3047,12 +3048,15 @@ public class AiBridgeServer {
                 r.addProperty("y", round(f[1]));
                 r.addProperty("angle", round(f[2]));
                 labels.add(r);
-                Part part = Configuration.get()
-                                         .getPart(text);
+                Part part = partForLabel(text);
                 if (part == null) {
                     r.addProperty("status", "error");
                     r.addProperty("error", "No part " + text + " in OpenPnP.");
                     continue;
+                }
+                if (!part.getId()
+                         .equals(text)) {
+                    r.addProperty("partId", part.getId());
                 }
                 ReferenceStripFeeder existing = null;
                 ReferenceStripFeeder similar = null;
@@ -4279,6 +4283,38 @@ public class AiBridgeServer {
 
     private static double round(double v) {
         return Math.round(v * 1000.0) / 1000.0;
+    }
+
+    /**
+     * The part a QR label names: the part with that id, else the only part whose id is the same
+     * when "ohm", "Ω" and its UTF-8 bytes read as Latin-1 ("Î©", as in parts imported from some
+     * BOMs) are taken as the same and case is ignored. Labels are printed with "ohm".
+     */
+    static Part partForLabel(String text) {
+        Part part = Configuration.get()
+                                 .getPart(text);
+        if (part != null) {
+            return part;
+        }
+        String key = normalizePartId(text);
+        Part found = null;
+        for (Part p : Configuration.get()
+                                   .getParts()) {
+            if (normalizePartId(p.getId()).equals(key)) {
+                if (found != null) {
+                    return null;
+                }
+                found = p;
+            }
+        }
+        return found;
+    }
+
+    static String normalizePartId(String id) {
+        return id.replace("Î©", "ohm")
+                 .replace("Ω", "ohm")
+                 .replace("Ω", "ohm")
+                 .toLowerCase(Locale.ROOT);
     }
 
     private static String describe(Throwable e) {
