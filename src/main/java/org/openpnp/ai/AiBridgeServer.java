@@ -81,6 +81,7 @@ import org.openpnp.machine.reference.ReferenceNozzleTipCalibration;
 import org.openpnp.machine.reference.camera.OpenPnpCaptureCamera;
 import org.openpnp.machine.reference.feeder.ReferenceLoosePartFeeder;
 import org.openpnp.machine.reference.feeder.ReferenceStripFeeder;
+import org.openpnp.machine.reference.vision.AbstractPartAlignment;
 import org.openpnp.machine.reference.vision.ReferenceBottomVision;
 import org.openpnp.machine.reference.vision.ReferenceBottomVision.PartSizeCheckMethod;
 import org.openpnp.model.BoardLocation;
@@ -106,6 +107,7 @@ import org.openpnp.spi.Machine;
 import org.openpnp.spi.MotionPlanner.CompletionType;
 import org.openpnp.spi.Nozzle;
 import org.openpnp.spi.NozzleTip;
+import org.openpnp.spi.PartAlignment;
 import org.openpnp.util.Cycles;
 import org.openpnp.util.MovableUtils;
 import org.openpnp.util.OpenCvUtils;
@@ -320,6 +322,8 @@ public class AiBridgeServer {
                     return placeFromJob(body);
                 case "/job/inspect":
                     return inspectPlacements(body);
+                case "/job/rework":
+                    return reworkPlacement(body);
                 case "/camera/capture":
                     return captureCamera(body);
                 case "/feeder/strip/setup":
@@ -2205,6 +2209,10 @@ public class AiBridgeServer {
      * placing all work as in a normal job run. The job is loaded on its own and is neither shown
      * in the Job tab nor saved, so the placed status in the file does not change.
      *
+     * The placements run in rounds by part height, lowest first, so that a nozzle placing a small
+     * part never comes down next to a taller one already placed (e.g. an IC pushed aside by a
+     * 0603 placed after it). A round that does not finish stops the later ones.
+     *
      * Body: {file, placements: [{boardId, placementId}], confirm}. boardId is the board's unique
      * id such as "Pnl1⇒Brd1", or its last part "Brd1" if that is unique.
      */
@@ -2303,57 +2311,105 @@ public class AiBridgeServer {
             List<String> rejectedParts = new ArrayList<>();
             int failuresInARow = 0;
             String error = null;
-            int placedBefore = countPlaced(job, selected);
-            while (true) {
-                int placedNow = countPlaced(job, selected);
-                if (placedNow > placedBefore) {
-                    failuresInARow = 0;
-                    placedBefore = placedNow;
-                }
-                processor.initialize(job);
-                try {
-                    while (processor.next()) {
-                        // Each call runs one step of the job.
+            // Rounds by part height, lowest first. While a round runs, the placements of the
+            // other rounds count as placed.
+            java.util.TreeMap<Double, Set<String>> rounds = new java.util.TreeMap<>();
+            for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+                for (Placement placement : entry.getValue()) {
+                    String key = entry.getKey()
+                                      .getUniqueId()
+                            + " " + placement.getId();
+                    if (!skipped.contains(key)) {
+                        rounds.computeIfAbsent(partHeight(placement), h -> new HashSet<>())
+                              .add(key);
                     }
-                    break;
                 }
-                catch (Exception e) {
+            }
+            Set<String> done = new HashSet<>();
+            for (Set<String> round : rounds.values()) {
+                for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+                    for (Placement placement : entry.getValue()) {
+                        String key = entry.getKey()
+                                          .getUniqueId()
+                                + " " + placement.getId();
+                        if (!skipped.contains(key)) {
+                            job.storePlacedStatus(entry.getKey(), placement.getId(),
+                                    !round.contains(key));
+                        }
+                    }
+                }
+                error = null;
+                int placedBefore = countPlaced(job, selected, round);
+                while (true) {
+                    int placedNow = countPlaced(job, selected, round);
+                    if (placedNow > placedBefore) {
+                        failuresInARow = 0;
+                        placedBefore = placedNow;
+                    }
+                    processor.initialize(job);
                     try {
-                        // Discards whatever was picked and parks the head.
-                        processor.abort();
+                        while (processor.next()) {
+                            // Each call runs one step of the job.
+                        }
+                        break;
                     }
-                    catch (Exception e2) {
-                        Logger.warn(e2, "AI bridge could not abort the job");
+                    catch (Exception e) {
+                        try {
+                            // Discards whatever was picked and parks the head.
+                            processor.abort();
+                        }
+                        catch (Exception e2) {
+                            Logger.warn(e2, "AI bridge could not abort the job");
+                        }
+                        error = describe(e);
+                        Logger.warn(e, "AI bridge job/place step failed");
+                        // A feeder that found no part has been disabled by the job processor. Run
+                        // the rest of the placements again, which then use the next feeder, until
+                        // the placements are done or no feeder is left.
+                        Object source = e instanceof JobProcessorException
+                                ? ((JobProcessorException) e).getSource()
+                                : null;
+                        if (source instanceof Feeder && !((Feeder) source).isEnabled()) {
+                            disabledFeeders.add(((Feeder) source).getName());
+                            if (hasFeedersLeft(machine, job, selected)) {
+                                continue;
+                            }
+                        }
+                        // A picked part that failed, e.g. bottom vision found it too far off, has
+                        // been discarded by abort(), and a pick that left the nozzle empty (no
+                        // vacuum) has moved the feeder on. Pick the next one, unless that keeps
+                        // failing, which points at a problem with the machine rather than the
+                        // parts.
+                        else if ((source instanceof Part || (source instanceof Nozzle
+                                && error.contains("vacuum-detected after pick")))
+                                && nozzlesEmpty(machine)) {
+                            rejectedParts.add(error);
+                            failuresInARow++;
+                            if (failuresInARow < maxPartFailures
+                                    && hasFeedersLeft(machine, job, selected)) {
+                                continue;
+                            }
+                            if (failuresInARow >= maxPartFailures) {
+                                error = maxPartFailures + " parts in a row failed, stopped. Last: "
+                                        + error;
+                            }
+                        }
+                        break;
                     }
-                    error = describe(e);
-                    Logger.warn(e, "AI bridge job/place step failed");
-                    // A feeder that found no part has been disabled by the job processor. Run
-                    // the rest of the placements again, which then use the next feeder, until
-                    // the placements are done or no feeder is left.
-                    Object source = e instanceof JobProcessorException
-                            ? ((JobProcessorException) e).getSource()
-                            : null;
-                    if (source instanceof Feeder && !((Feeder) source).isEnabled()) {
-                        disabledFeeders.add(((Feeder) source).getName());
-                        if (hasFeedersLeft(machine, job, selected)) {
-                            continue;
+                }
+                for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
+                    for (Placement placement : entry.getValue()) {
+                        String key = entry.getKey()
+                                          .getUniqueId()
+                                + " " + placement.getId();
+                        if (round.contains(key)
+                                && job.retrievePlacedStatus(entry.getKey(), placement.getId())) {
+                            done.add(key);
                         }
                     }
-                    // A picked part that failed, e.g. bottom vision found it too far off, has
-                    // been discarded by abort(). Pick the next one, unless that keeps failing,
-                    // which points at a problem with the machine rather than the parts.
-                    else if (source instanceof Part && nozzlesEmpty(machine)) {
-                        rejectedParts.add(error);
-                        failuresInARow++;
-                        if (failuresInARow < maxPartFailures
-                                && hasFeedersLeft(machine, job, selected)) {
-                            continue;
-                        }
-                        if (failuresInARow >= maxPartFailures) {
-                            error = maxPartFailures + " parts in a row failed, stopped. Last: "
-                                    + error;
-                        }
-                    }
+                }
+                if (!done.containsAll(round)) {
+                    // Taller parts would land next to gaps where smaller ones belong.
                     break;
                 }
             }
@@ -2368,14 +2424,15 @@ public class AiBridgeServer {
                     boolean skip = skipped.contains(entry.getKey()
                                                         .getUniqueId()
                             + " " + placement.getId());
-                    boolean done = !skip
-                            && job.retrievePlacedStatus(entry.getKey(), placement.getId());
-                    p.addProperty("placed", done);
+                    boolean isDone = !skip && done.contains(entry.getKey()
+                                                                 .getUniqueId()
+                            + " " + placement.getId());
+                    p.addProperty("placed", isDone);
                     if (skip) {
                         p.addProperty("skipped", "A part seems to be there already.");
                     }
                     placed.add(p);
-                    missing += done || skip ? 0 : 1;
+                    missing += isDone || skip ? 0 : 1;
                 }
             }
             JsonObject o;
@@ -2408,14 +2465,32 @@ public class AiBridgeServer {
         return result;
     }
 
-    private static int countPlaced(Job job, Map<BoardLocation, List<Placement>> selected) {
+    private static int countPlaced(Job job, Map<BoardLocation, List<Placement>> selected,
+            Set<String> round) {
         int n = 0;
         for (Map.Entry<BoardLocation, List<Placement>> entry : selected.entrySet()) {
             for (Placement placement : entry.getValue()) {
-                n += job.retrievePlacedStatus(entry.getKey(), placement.getId()) ? 1 : 0;
+                if (round.contains(entry.getKey()
+                                        .getUniqueId()
+                        + " " + placement.getId())) {
+                    n += job.retrievePlacedStatus(entry.getKey(), placement.getId()) ? 1 : 0;
+                }
             }
         }
         return n;
+    }
+
+    /**
+     * @return the height of the placement's part in mm, 0 if unknown.
+     */
+    private static double partHeight(Placement placement) {
+        Part part = placement.getPart();
+        if (part == null || part.getHeight() == null) {
+            return 0;
+        }
+        return part.getHeight()
+                   .convertToUnits(LengthUnit.Millimeters)
+                   .getValue();
     }
 
     private static boolean nozzlesEmpty(Machine machine) {
@@ -2562,6 +2637,280 @@ public class AiBridgeServer {
             o.add("images", imageArray);
             return o;
         });
+    }
+
+    /**
+     * Picks a part that is already on the board, turns it and puts it back where it was, e.g. an
+     * IC placed the wrong way round. The nozzle comes down on the placement's expected location
+     * at board Z plus part height, as when placing, so the part should lie about where the job
+     * expects it. Bottom vision then aligns it as for a placement turned by rotateDegrees, as in
+     * a job. Afterwards the top camera takes a photo of the placement.
+     *
+     * If bottom vision fails, the part is put back where it was picked, not turned.
+     *
+     * Body: {file, boardId, placementId, rotateDegrees (default 180), align (default true:
+     * bottom vision), maxOffsetMm (default 3: how far off the nozzle the part may be, instead of
+     * the tip's Max. Pick Tolerance), nozzleId (optional: default the first nozzle with a
+     * fitting tip), confirm}
+     */
+    private JsonObject reworkPlacement(JsonObject body) throws Exception {
+        Machine machine = Configuration.get()
+                                       .getMachine();
+        Job job = loadJob(getString(body, "file"));
+        JsonObject wanted = new JsonObject();
+        wanted.addProperty("boardId", getString(body, "boardId"));
+        wanted.addProperty("placementId", getString(body, "placementId"));
+        JsonArray wantedArray = new JsonArray();
+        wantedArray.add(wanted);
+        JsonObject select = new JsonObject();
+        select.add("placements", wantedArray);
+        Map<BoardLocation, List<Placement>> selected =
+                selectPlacements(job, select, false, new ArrayList<>());
+        BoardLocation boardLocation = selected.keySet()
+                                              .iterator()
+                                              .next();
+        Placement placement = selected.get(boardLocation)
+                                      .get(0);
+        Part part = placement.getPart();
+        double rotateDegrees = getDouble(body, "rotateDegrees", 180);
+        boolean align = getBoolean(body, "align", true);
+        double maxOffsetMm = getDouble(body, "maxOffsetMm", 3.0);
+
+        Nozzle nozzle = null;
+        String nozzleId = getString(body, "nozzleId");
+        if (nozzleId != null) {
+            nozzle = findNozzle(machine, nozzleId);
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle with id " + nozzleId);
+            }
+        }
+        else {
+            for (Head head : machine.getHeads()) {
+                for (Nozzle n : head.getNozzles()) {
+                    if (nozzle == null && n.getNozzleTip() != null && part.getPackage() != null
+                            && part.getPackage()
+                                   .getCompatibleNozzleTips()
+                                   .contains(n.getNozzleTip())) {
+                        nozzle = n;
+                    }
+                }
+            }
+            if (nozzle == null) {
+                throw new BadRequest("No nozzle has a tip that fits " + part.getId()
+                        + "; load one, or give nozzleId.");
+            }
+        }
+        if (nozzle.getPart() != null) {
+            throw new BadRequest("Nozzle " + nozzle.getName() + " already holds "
+                    + nozzle.getPart()
+                            .getId()
+                    + "; discard it first.");
+        }
+        if (part.getHeight() == null || part.getHeight()
+                                            .getValue() <= 0) {
+            throw new BadRequest("Part " + part.getId()
+                    + " has no height, so the pick Z is unknown; set it with update_part.");
+        }
+
+        Set<PlacementsHolderLocation<?>> fiducialLocations = fiducialLocations(selected);
+        Location expected = Utils2D.calculateBoardPlacementLocation(boardLocation, placement)
+                                   .convertToUnits(LengthUnit.Millimeters);
+        Camera camera = machine.getDefaultHead()
+                               .getDefaultCamera();
+        JsonObject gate = gateMotion(machine, body, String.format(
+                "%sWith nozzle %s (%s), pick %s (%s) from %s at %s: down to board Z + part "
+                        + "height %s, vacuum on, check the vacuum, up to Safe Z. Turn it by %s "
+                        + "degrees%s and put it back at the same place. Then camera %s takes a "
+                        + "photo of it and the head is parked.",
+                fiducialLocations.isEmpty() ? ""
+                        : "Check the fiducials of " + fiducialLocations.size()
+                                + " board(s)/panel(s). ",
+                nozzle.getName(), nozzle.getNozzleTip() == null ? "no tip"
+                        : nozzle.getNozzleTip()
+                                .getName(),
+                placement.getId(), part.getId(), boardLocation.getUniqueId(), format(expected),
+                part.getHeight(), round(rotateDegrees),
+                align ? ", aligned with bottom vision" : " (no bottom vision)", camera.getName()));
+        if (gate != null) {
+            return gate;
+        }
+
+        final Nozzle n = nozzle;
+        return runLogged("job/rework", body, machine, () -> {
+            JsonArray fiducialsChecked = new JsonArray();
+            if (!fiducialLocations.isEmpty()) {
+                machine.getFiducialLocator()
+                       .locateAllPlacementsHolder(new ArrayList<>(fiducialLocations), null);
+                for (PlacementsHolderLocation<?> l : fiducialLocations) {
+                    fiducialsChecked.add(new JsonPrimitive(l.getUniqueId()));
+                }
+            }
+            // After the fiducials, as in the job processor.
+            Location location =
+                    Utils2D.calculateBoardPlacementLocation(boardLocation, placement)
+                           .convertToUnits(LengthUnit.Millimeters);
+
+            n.moveToPlacementLocation(location, part);
+            n.pick(part, null);
+            n.moveToSafeZ();
+            if (n.isPartOnEnabled(Nozzle.PartOnStep.AfterPick) && !n.isPartOn()) {
+                // Nothing came up: release the vacuum where it is, at Safe Z.
+                n.place();
+                throw new Exception("No part vacuum-detected after picking " + placement.getId()
+                        + " from the board; the part should still be there.");
+            }
+
+            // Bottom vision aligns the part as for a placement turned by rotateDegrees: the nozzle
+            // is turned there and only the small error is corrected. Turning the nozzle by 180
+            // degrees alone is several degrees short on this machine (2026-10-27).
+            Placement turned = new Placement(placement);
+            turned.setLocation(placement.getLocation()
+                                        .derive(null, null, null, placement.getLocation()
+                                                                           .getRotation()
+                                                + rotateDegrees));
+            Location placeLocation =
+                    Utils2D.calculateBoardPlacementLocation(boardLocation, turned.getLocation())
+                           .convertToUnits(LengthUnit.Millimeters);
+            JsonObject alignment = new JsonObject();
+            PartAlignment partAlignment = align ? AbstractPartAlignment.getPartAlignment(part)
+                    : null;
+            if (partAlignment != null) {
+                // A part picked from the board may sit further off the nozzle than one from a
+                // feeder; allow up to maxOffsetMm for this pick only.
+                ReferenceNozzleTip tip = n.getNozzleTip() instanceof ReferenceNozzleTip
+                        ? (ReferenceNozzleTip) n.getNozzleTip()
+                        : null;
+                Length toleranceBefore = tip == null ? null : tip.getMaxPickTolerance();
+                PartAlignment.PartAlignmentOffset offsets;
+                try {
+                    if (tip != null && toleranceBefore.convertToUnits(LengthUnit.Millimeters)
+                                                      .getValue() < maxOffsetMm) {
+                        tip.setMaxPickTolerance(new Length(maxOffsetMm, LengthUnit.Millimeters));
+                    }
+                    offsets = findOffsetsWithRetry(partAlignment, part, boardLocation, turned, n,
+                            alignment);
+                }
+                catch (Exception e) {
+                    // Put the part back where it was picked, as it was.
+                    n.moveToPlacementLocation(location, part);
+                    n.place();
+                    n.moveToSafeZ();
+                    throw new Exception("Bottom vision failed, so " + placement.getId()
+                            + " was put back where it was picked, not turned: " + describe(e),
+                            e);
+                }
+                finally {
+                    if (tip != null) {
+                        tip.setMaxPickTolerance(toleranceBefore);
+                    }
+                }
+                Location o = offsets.getLocation()
+                                    .convertToUnits(LengthUnit.Millimeters);
+                alignment.add("offsets", toJson(o));
+                alignment.addProperty("preRotated", offsets.getPreRotated());
+                // As ReferencePnpJobProcessor.getPlacementLocation().
+                if (offsets.getPreRotated()) {
+                    placeLocation = placeLocation.subtractWithRotation(o);
+                }
+                else {
+                    Location l = new Location(LengthUnit.Millimeters).rotateXyCenterPoint(o,
+                            placeLocation.getRotation() - o.getRotation());
+                    l = l.derive(null, null, null, placeLocation.getRotation() - o.getRotation());
+                    placeLocation = l.add(placeLocation)
+                                     .subtract(o);
+                }
+            }
+            alignment.addProperty("bottomVision", partAlignment != null);
+            n.moveToPlacementLocation(placeLocation, part);
+            n.place();
+            n.moveToSafeZ();
+            if (n.isPartOffEnabled(Nozzle.PartOffStep.AfterPlace) && !n.isPartOff()) {
+                throw new Exception("Part vacuum-detected on nozzle " + n.getName()
+                        + " after placing it back.");
+            }
+
+            MovableUtils.moveToLocationAtSafeZ(camera,
+                    camera.getLocation()
+                          .convertToUnits(LengthUnit.Millimeters)
+                          .derive(location.getX(), location.getY(), location.getZ(), null));
+            BufferedImage frame = camera.lightSettleAndCapture();
+            Location upp = camera.getUnitsPerPixelAtZ()
+                                 .convertToUnits(LengthUnit.Millimeters);
+            File frameFile = saveInspectionFrame(frame, boardLocation, placement);
+            MovableUtils.park(camera.getHead());
+
+            JsonObject o = ok();
+            o.add("fiducialsChecked", fiducialsChecked);
+            o.addProperty("boardId", boardLocation.getUniqueId());
+            o.addProperty("placementId", placement.getId());
+            o.addProperty("partId", part.getId());
+            o.addProperty("nozzleName", n.getName());
+            o.add("location", toJson(location));
+            o.addProperty("rotatedDegrees", round(rotateDegrees));
+            o.add("alignment", alignment);
+            o.addProperty("frameFile", frameFile == null ? null : frameFile.getAbsolutePath());
+            String name = boardLocation.getUniqueId() + " " + placement.getId() + " after";
+            JsonObject i = new JsonObject();
+            i.addProperty("name", name);
+            i.addProperty("mimeType", "image/png");
+            i.addProperty("data", toPngBase64(
+                    drawExpectedFootprint(frame, placement, location, upp, null, null),
+                    MAX_IMAGE_DIMENSION));
+            JsonArray imageArray = new JsonArray();
+            imageArray.add(i);
+            o.add("images", imageArray);
+            o.addProperty("legend", "The image is drawn where the job expects the part: body "
+                    + "outline green, pads cyan, pin 1 red dot, image center yellow cross. "
+                    + "Check pin 1 in the image.");
+            return o;
+        });
+    }
+
+    /**
+     * Bottom vision for reworkPlacement. If it fails, it runs once more with the Threshold stages
+     * at 55% of their value: with the nozzle turned about 180 degrees, the leads of an SOP-16
+     * show much darker on this machine (2026-10-27: threshold 33 finds only 3 mm of the 6.2 mm
+     * lead span, 18 finds it all). The thresholds are put back afterwards, so nothing is saved.
+     */
+    private static PartAlignment.PartAlignmentOffset findOffsetsWithRetry(
+            PartAlignment partAlignment, Part part, BoardLocation boardLocation,
+            Placement placement, Nozzle nozzle, JsonObject alignment) throws Exception {
+        try {
+            return partAlignment.findOffsets(part, boardLocation, placement, nozzle);
+        }
+        catch (Exception e) {
+            if (!(partAlignment instanceof ReferenceBottomVision)) {
+                throw e;
+            }
+            Logger.info("AI bridge rework: bottom vision failed ({}), trying a lower threshold",
+                    describe(e));
+            alignment.addProperty("firstTry", describe(e));
+            BottomVisionSettings settings =
+                    ((ReferenceBottomVision) partAlignment).getInheritedVisionSettings(part);
+            Map<Threshold, Integer> originals = new HashMap<>();
+            try (CvPipeline pipeline = settings.getPipeline()) {
+                JsonArray thresholds = new JsonArray();
+                for (CvStage stage : pipeline.getStages()) {
+                    if (stage instanceof Threshold && stage.isEnabled()) {
+                        Threshold threshold = (Threshold) stage;
+                        originals.put(threshold, threshold.getThreshold());
+                        threshold.setThreshold((int) Math.round(threshold.getThreshold() * 0.55));
+                        thresholds.add(new JsonPrimitive(threshold.getThreshold()));
+                    }
+                }
+                if (originals.isEmpty()) {
+                    throw e;
+                }
+                alignment.add("retryThresholds", thresholds);
+                return partAlignment.findOffsets(part, boardLocation, placement, nozzle);
+            }
+            finally {
+                for (Map.Entry<Threshold, Integer> original : originals.entrySet()) {
+                    original.getKey()
+                            .setThreshold(original.getValue());
+                }
+            }
+        }
     }
 
     /**

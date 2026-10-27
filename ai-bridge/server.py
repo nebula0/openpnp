@@ -357,6 +357,46 @@ def inspect_placements(
 
 
 @mcp.tool()
+def rework_placement(
+    job_file: str,
+    board_id: str,
+    placement_id: str,
+    reason: str,
+    confirm: bool = False,
+    rotate_degrees: float = 180,
+    align: bool = True,
+    max_offset_mm: float = 3.0,
+    nozzle_id: str | None = None,
+) -> list:
+    """Pick a part that is already placed on the board, turn it by rotate_degrees (default
+    180, e.g. an IC placed the wrong way round) and put it back at the same place.
+
+    The nozzle (default the first with a tip that fits the part) comes down on the placement's
+    expected location at board Z plus part height, as when placing, so the part must lie about
+    where the job expects it. Bottom vision (align, default on) then aligns it as for the
+    placement turned by rotate_degrees, as in a job; the result gives the offsets. Without it the
+    part is only turned about the nozzle, and the nozzle turns 180 degrees several degrees
+    short on this machine. A part picked from the board may sit further off the nozzle than
+    one from a feeder, so bottom vision accepts up to max_offset_mm (instead of the tip's Max.
+    Pick Tolerance). If bottom vision fails, it is tried once more with the Threshold stages at
+    55% (with the nozzle turned about 180 degrees the leads show much darker); if that fails
+    too, the part is put back where it was, not turned. alignment in the result tells which.
+    If no part comes up
+    (vacuum check), the vacuum is released and it fails; the part stays on the board. On wet
+    solder paste, the pick may take some paste along.
+    Afterwards the top camera photographs the placement (footprint drawn as in
+    inspect_placements; check pin 1 in it) and the head is parked.
+
+    MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
+    call again with confirm=true. On failure check nozzlesAfterFailure.
+    """
+    body = {"file": job_file, "boardId": board_id, "placementId": placement_id,
+            "rotateDegrees": rotate_degrees, "align": align, "maxOffsetMm": max_offset_mm, "nozzleId": nozzle_id, "confirm": confirm,
+            "reason": reason}
+    return _with_images(_call("POST", "/job/rework", body=body))
+
+
+@mcp.tool()
 def capture_camera(z: float | None = None) -> list:
     """Take a photo with the top camera where it is now. Does not move the machine.
 
