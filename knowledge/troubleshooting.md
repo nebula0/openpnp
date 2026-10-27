@@ -132,6 +132,7 @@
 - 原因：散料盤的方向程式 `scripts/AD608_Polarity.bsh` 會找 pin 1 圓點，但「pin 1 在哪一端算 0°」要跟板子一致。fm_pnp 的 U1 絲印 pin 1 在 −X 端（rotation 0 時是左下角）；10/27 之前程式用 +X 端（跟 SOP-16 footprint 一樣），所以每顆都反了。已修。
 - 先試：比對空板照片（`inspect/bare/…-U1.png`）裡的絲印圓點，和放好之後 IC 上凹點的位置。`inspect_feeder` 看散料盤：凹點在 −X 時 rotation 應該是 0。
 - `inspect_placements` 分不出 pin 1，IC 放完都要看一次照片。換新板子或新 IC 時，先確認約定。
+- 10/27 也發現找圓的步驟（直徑 24–50 px）根本抓不到凹點（約 90 px），抓到的是雜點，方向只是碰巧對。現在 script 會擋下不在本體端點上的圓（報 `AD608 Pin-1 mark not found on an end of the body`）。看到這個錯誤時，表示 pipeline 的圓直徑還沒調好。
 
 ### 驗收時每一顆都判定 `check`（「something else changed」、尺寸不符）
 - 原因：一次放完一整片時，每顆的「放置前照片」拍完之後，旁邊的零件才陸續放上去（尤其最後放的 IC），所以照片裡到處都是變化。
