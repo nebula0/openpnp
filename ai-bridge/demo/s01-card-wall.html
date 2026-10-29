@@ -323,24 +323,21 @@ body.idle { cursor: default; }
         ", 0 0 0 " + (2.5 * focus).toFixed(2) + "px " + rgba(mix(c.o === "human" ? C.human : DEEP.ai, C.ink, 0.25), focus) +
         ", 0 10px 30px -8px " + rgba(c.o === "human" ? C.human : DEEP.ai, 0.5 * focus);
       c.lb.style.color = rgb(txt);
-      c.lb.style.fontWeight = String(Math.round(560 + 190 * focus));
     });
 
     var hv = t < T.deal ? shown : CARDS.length - landed;
     setCount("human", hv, t);
     setCount("ai", landed, t);
     N.human.classList.toggle("drop", t >= T.deal && hv < 20);
-    // final light-up: titles, header rules, frames, counters and cards all follow the same focus curve
+    // final light-up: titles, header rules, frames, counters and cards change color on the same focus curve
     [["human", C.human], ["ai", DEEP.ai]].forEach(function (p) {
       var col = rgb(mix(C.ink, p[1], focus));
       HD[p[0]].ttl.style.color = col;
-      HD[p[0]].ttl.style.webkitTextStroke = (0.8 + 1.8 * focus).toFixed(2) + "px " + col;
-      HD[p[0]].hd.style.borderBottom = (2 + 3 * focus).toFixed(2) + "px solid " + col;
+      HD[p[0]].ttl.style.webkitTextStroke = "0.8px " + col;
+      HD[p[0]].hd.style.borderBottomColor = col;
       P[p[0]].style.outline = (5 * focus).toFixed(2) + "px solid " + rgba(p[1], focus);
     });
     N.ai.style.color = rgb(mix(C.ink, DEEP.ai, focus));
-    N.ai.style.fontWeight = String(Math.round(400 + 400 * focus));
-    N.human.style.fontWeight = String(Math.round(700 + 100 * focus));
 
     var pn = nameParam ? eOut((t - T.product) / 0.7) : 0;
     product.style.opacity = pn.toFixed(3);
