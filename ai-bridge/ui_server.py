@@ -36,6 +36,36 @@ ACTION_LOG_LIMIT = 300
 EVENT_HISTORY = 5000
 
 
+# Which tool calls the page asks about. Reading never needs asking; a machine tool only when it
+# really moves (confirm=true; without confirm it only returns its plan); changing settings or
+# files always does, unless the page's auto-allow switch is on.
+READ_ONLY_TOOLS = {
+    "get_status", "list_feeders", "list_nozzles", "list_parts", "list_job_placements",
+    "get_bed_map", "get_bed_map_scan_status", "cancel_bed_map_scan", "capture_camera",
+    "read_nozzle_vacuum", "update_plan",
+}
+MOTION_TOOLS = {
+    "inspect_feeder", "pick_from_feeder", "place_from_job", "inspect_placements", "move_camera",
+    "probe_feeder_z", "test_bottom_vision", "survey_bare_boards", "scan_qr_feeders",
+    "scan_bed_map", "home_machine", "discard_part", "rework_placement", "calibrate_nozzle_tip",
+}
+READ_ONLY_BUILTINS = {"Read", "Glob", "Grep", "ToolSearch"}
+
+
+def needs_asking(tool_name, tool_input):
+    tool_input = tool_input or {}
+    if tool_name.startswith("mcp__openpnp"):
+        tool = tool_name.split("__")[-1]
+        if tool in READ_ONLY_TOOLS:
+            return False
+        if tool == "camera_properties":
+            return bool(tool_input.get("set"))
+        if tool in MOTION_TOOLS:
+            return bool(tool_input.get("confirm"))
+        return True
+    return tool_name not in READ_ONLY_BUILTINS
+
+
 class Bridge:
     """Talks to AiBridgeServer and its view server; bridge.json is read again on every call,
     because OpenPnP writes a new token each time it starts."""
@@ -117,8 +147,12 @@ class Chat:
             f"For work with two or more steps, first list the steps with the update_plan tool of "
             f"'{server}' and call it again whenever a step starts or finishes; the UI shows the plan "
             "on the task timeline, grouped into phases (setup, feeders, vision, boards, place, "
-            "inspect, rework), so name each step so that its phase is clear. Keep replies short, "
-            "in the language the user writes in."
+            "inspect, rework), so name each step so that its phase is clear. "
+            "Here the page asks the user to allow each call that moves the machine (or the user "
+            "has turned on auto-allow), and that answer is the user's consent: for a tool that "
+            "takes confirm, call it without confirm for the plan, then at once with confirm=true; "
+            "do not stop to ask in the chat first. Write the reason so the user can decide from "
+            "it. Keep replies short, in the language the user writes in."
         )
 
     def start(self):
@@ -176,9 +210,9 @@ class Chat:
                  "tool_name": request.get("tool_name"), "input": request.get("input"),
                  "tool_use_id": request.get("tool_use_id"),
                  "description": request.get("description")}
-        # update_plan only draws the task timeline, so it never needs asking.
-        if self.auto_approve or str(request.get("tool_name", "")).endswith("__update_plan"):
-            self.emit(event)
+        if self.auto_approve or not needs_asking(str(request.get("tool_name", "")),
+                                                 request.get("input")):
+            # No card on the page; the tool call itself still shows in the chat.
             self.answer(request_id, True, auto=True, input=request.get("input"))
             return
         with self.lock:
@@ -446,12 +480,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--sim", action="store_true", help="use the simulator configuration")
     parser.add_argument("--port", type=int, default=8990)
+    parser.add_argument("--resume", metavar="SESSION_ID",
+                        help="continue this Claude Code session in the chat")
     args = parser.parse_args()
     home = Path(os.environ.get("USERPROFILE") or Path.home())
     config_dir = Path(os.environ.get("OPENPNP_CONFIG_DIR")
                       or (home / ("openpnp-sim" if args.sim else ".openpnp2")))
     bridge = Bridge(config_dir)
     chat = Chat(args.sim)
+    chat.session_id = args.resume
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(bridge, chat, config_dir))
     server.daemon_threads = True
     print(f"OpenPnP UI ({'simulator' if args.sim else 'real machine'}, {config_dir}): "

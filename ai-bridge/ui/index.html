@@ -382,8 +382,17 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
 #composer .row .grow { flex: 1; }
 #attach { display: flex; gap: 6px; }
 #attach img { height: 44px; border-radius: 6px; }
-.switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; }
-.switch input { accent-color: var(--accent); }
+.switch { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; user-select: none; }
+.switch input {
+  appearance: none; -webkit-appearance: none; margin: 0; width: 40px; height: 22px; border-radius: 11px;
+  background: var(--active); position: relative; cursor: pointer; transition: background .2s; flex: 0 0 auto;
+}
+.switch input::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: left .2s;
+}
+.switch input:checked { background: var(--accent); }
+.switch input:checked::after { left: 20px; }
 .switch.on { color: var(--accent); font-weight: 500; }
 
 #lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; place-items: center; z-index: 20; cursor: zoom-out; }
@@ -498,7 +507,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
             <h2>Claude</h2>
             <span class="sub" id="chatSub"></span>
             <span class="grow"></span>
-            <label class="switch" id="autoWrap" title="When on, tools that need permission run without asking"><input type="checkbox" id="autoApprove">Auto-approve</label>
+            <label class="switch" id="autoWrap" title="Off: you allow each move of the machine and each change of settings or files, once. Reading never asks. On: everything runs without asking."><input type="checkbox" role="switch" id="autoApprove">Auto-allow</label>
             <button class="btn" id="newChat" type="button">New chat</button>
           </div>
           <div id="chatLog"><div class="empty" id="chatEmpty">Tell Claude what to do. Tools that need permission will ask you here.</div></div>
@@ -1609,6 +1618,8 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
   $('autoApprove').onchange = function () {
     postJSON('/api/chat/settings', { autoApprove: this.checked });
     $('autoWrap').classList.toggle('on', this.checked);
+    addToLog(el('div', 'note', this.checked ? 'Auto-allow is on: Claude moves the machine and changes settings without asking.'
+      : 'Auto-allow is off: you allow each move and each change once.'));
   };
   log.addEventListener('click', function (e) {
     if (e.target.tagName === 'IMG') { $('lightbox').querySelector('img').src = e.target.src; $('lightbox').style.display = 'grid'; }

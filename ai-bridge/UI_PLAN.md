@@ -99,6 +99,8 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 - [x] 頂部視覺疊圖（10/29）：`inspect_feeder` 跑完 pipeline 後，view server 存下結果的 RotatedRect（IC 本體，綠框）和名稱含 pin1 的 stage 找到的圓（pin 1，橘圈），連同當時相機的位置；`/status` 的 `visionOverlays` 帶給介面，疊在即時畫面上。相機移開 0.3 mm 以上或過了 10 分鐘就不畫。模擬機上用 Sim-Loose-1 測過（6 個框都對在零件上）
 - [x] Task 對齊（10/29）：進行中的 task（沒有就用目前階段的標題）捲到跟相機畫面中心同高。清單上下用 ::before/::after 撐出捲動空間（用 padding 會把清單撐得比面板高，就捲不動）
 - [x] 重新打包（10/29），真機上 `/status` 有 tools 位置、jog 在未啟用時正確拒絕。疊圖要等真機跑 `inspect_feeder`（例如 AD608 的 cell）才看得到 pin 1
+- [x] 一個動作只按一次 Allow（10/29，使用者要求）：ui_server 的 `needs_asking` 決定要不要問。讀資料的工具（get_status、list_*、capture_camera、Read、Grep…）不問；會動的工具只有 `confirm=true` 那次問（不帶 confirm 只是拿計畫）；改設定、改檔案、跑指令都問。不問的不顯示卡片。系統提示告訴 Claude：介面上的 Allow 就是使用者的同意，不用再在對話裡先問。Auto-allow 改成明顯的開關，打開時全部不問
+- [x] `ui_server.py --resume <session id>`：重開 server 後接續同一段 Claude 對話（頁面上的對話紀錄會清掉）
 - [ ] 真機測試：用介面的對話實際操作一次（例如讓 Claude 歸零、掃 QR），確認核准按鈕和時間軸的「現在」
 - [ ] 第三階段
 
