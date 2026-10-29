@@ -1,0 +1,388 @@
+<title>S01 卡片牆</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=Space+Mono:wght@400;700&display=swap">
+<style>
+/* Layout: fixed 1920x1080 stage, letterboxed. Planner checklist look: white list cards in clear sleeves,
+   letter-spaced typewriter titles, pastel task rows shaded light-deep-light down each list, a checkbox per
+   row. Every task starts in the Human list (light orange); dealt tasks turn blue in the AI list, then
+   AI ticks them one by one; the three left for the human turn solid orange. Single committed light look. */
+:root {
+  color-scheme: light;
+  --ground: #dedcd8;
+  --ground-2: #cfccc7;
+  --paper: #fcfbf9;
+  --ink: #26221f;
+  --ink-soft: #77716b;
+  --rule: rgba(38,34,31,0.18);
+  --human: #e8702f;
+  --ai: #4a7fc1;
+  --font-display: "Archivo", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Space Mono", "Courier New", Consolas, monospace;
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--ground-2); }
+body { font-family: var(--font-display); color: var(--ink); cursor: none; }
+body.idle { cursor: default; }
+#viewport { position: fixed; inset: 0; background: var(--ground-2); }
+#stage {
+  position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; transform-origin: 0 0; overflow: hidden;
+  background:
+    radial-gradient(ellipse 60% 50% at 25% 15%, rgba(255,255,255,0.55), rgba(255,255,255,0) 70%),
+    linear-gradient(165deg, var(--ground), var(--ground-2));
+}
+
+/* white list card inside a clear plastic sleeve */
+.panel {
+  position: absolute; left: 0; top: 0; box-sizing: border-box; border-radius: 24px; background: var(--paper);
+}
+.panel .hd {
+  position: absolute; left: 40px; right: 40px; top: 36px; height: 144px; box-sizing: border-box;
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
+  padding-bottom: 14px; border-bottom: 2px solid var(--ink);
+}
+.panel .ttl {
+  font: 700 56px var(--font-mono); letter-spacing: 0.2em; text-transform: uppercase; line-height: 0.9;
+  -webkit-text-stroke: 0.8px currentColor; padding-bottom: 2px;
+}
+.panel .cnt {
+  font-size: 134px; font-weight: 700; font-stretch: 75%; font-variation-settings: "wdth" 75;
+  font-variant-numeric: tabular-nums; line-height: 0.74; letter-spacing: -0.02em;
+  transform-origin: 100% 100%; transition: color 0.25s;
+}
+#n-human.drop { color: var(--human); }
+#n-ai { font-weight: 400; }
+#n-ai.lit { color: var(--ai); }
+
+#cards { position: absolute; inset: 0; }
+.card { position: absolute; left: 0; top: 0; box-sizing: border-box; border-radius: 9px; transform-origin: 50% 50%; will-change: transform; }
+.card .box {
+  position: absolute; left: 0.6em; top: 50%; width: 0.8em; height: 0.8em; margin-top: -0.4em;
+  border-radius: 0.16em; background: #ffffff; box-shadow: 0 1px 2px rgba(38,34,31,0.18);
+}
+.card .box svg { position: absolute; inset: 0.1em; width: 0.6em; height: 0.6em; fill: none; stroke-width: 3.2; stroke-linecap: round; stroke-linejoin: round; }
+.card .lab {
+  position: absolute; left: 1.9em; right: 0.6em; top: 0; bottom: 0; display: flex; align-items: center;
+  font-weight: 560; font-stretch: 92%; font-variation-settings: "wdth" 92; line-height: 1.08; text-wrap: balance;
+}
+
+#product {
+  position: absolute; left: 80px; top: 984px; font: 700 44px var(--font-mono); letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--ink); opacity: 0;
+}
+#subs {
+  position: absolute; left: 0; right: 0; top: 984px; text-align: center; font-size: 46px; font-weight: 600;
+  font-stretch: 85%; font-variation-settings: "wdth" 85; color: var(--ink); opacity: 0;
+}
+
+#help {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+  background: rgba(252,251,249,0.95); border: 1px solid var(--rule); border-radius: 10px;
+  box-shadow: 0 10px 30px -12px rgba(38,34,31,0.35);
+  padding: 12px 16px; display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; justify-content: center;
+  font: 14px var(--font-ui); color: var(--ink-soft); max-width: calc(100vw - 32px); box-sizing: border-box;
+}
+#help button {
+  font: 600 15px var(--font-ui); color: var(--ink); background: var(--paper);
+  border: 1px solid var(--rule); border-radius: 6px; padding: 8px 14px; cursor: pointer;
+}
+#help button:hover { border-color: var(--human); }
+#help button:focus-visible { outline: 2px solid var(--human); outline-offset: 2px; }
+#help kbd { font: 13px var(--font-mono); color: var(--ink); background: var(--paper); border: 1px solid var(--rule); border-radius: 3px; padding: 1px 6px; }
+</style>
+
+<div id="viewport">
+  <div id="stage">
+    <div class="panel" id="p-ai"><div class="hd"><span class="ttl">AI</span><span class="cnt" id="n-ai">0</span></div></div>
+    <div class="panel" id="p-human"><div class="hd"><span class="ttl">Human</span><span class="cnt" id="n-human">0</span></div></div>
+
+    <div id="cards"></div>
+    <div id="product"></div>
+    <div id="subs"></div>
+  </div>
+</div>
+
+<div id="help">
+  <button type="button" id="btn1">Play</button>
+  <button type="button" id="btn2">Play from pile</button>
+  <span><kbd>1</kbd> <kbd>2</kbd> play · <kbd>Space</kbd> pause · <kbd>R</kbd> reset · click the stage to pause</span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var DUR = 10;
+
+  // Tasks from "YC Demo 影片腳本 v1", shortened. AI runs the scripts and checks their results;
+  // the human keeps design, results, and moving things. owner: ai / human.
+  var CARDS = [
+    { t: "Calibrate nozzle", o: "ai" },
+    { t: "Check vacuum", o: "ai" },
+    { t: "Map the bed", o: "ai" },
+    { t: "Identify feeders", o: "ai" },
+    { t: "Teach pick points", o: "ai" },
+    { t: "Measure feeder Z", o: "ai" },
+    { t: "Check feeder parts", o: "ai" },
+    { t: "Find fiducials", o: "ai" },
+    { t: "Place parts", o: "ai" },
+    { t: "Measure offsets", o: "ai" },
+    { t: "Discard bad picks", o: "ai" },
+    { t: "Tune vision", o: "ai" },
+    { t: "Retry failed vision", o: "ai" },
+    { t: "Diagnose mispicks", o: "ai" },
+    { t: "Fix wrong settings", o: "ai" },
+    { t: "Rework misplaced parts", o: "ai" },
+    { t: "Search past fixes", o: "ai" },
+    { t: "Design the board", o: "human" },
+    { t: "Approve the result", o: "human" },
+    { t: "Load parts & boards", o: "human" }
+  ];
+
+  var params = new URLSearchParams(location.search);
+  var SUBS = params.get("subs") === "1";
+  var SUB1 = "Every one of these needs a person.";
+  var SUB2 = "AI checks the work. You check three.";
+
+  // ---------- colors ----------
+  function hex(h) { return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
+  var C = { ink: hex("#26221f"), white: hex("#ffffff"), human: hex("#e8702f") };
+  // pastel row tones per list: [lightest, deepest]; rows shade light -> deep -> light down the list
+  var TONE = {
+    human: [hex("#fdebdf"), hex("#f7c29d")],
+    ai: [hex("#e1ecf8"), hex("#a8c7eb")]
+  };
+  var DEEP = { ai: hex("#4a7fc1") };
+  function mix(a, b, k) { return [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k]; }
+  function rgb(c) { return "rgb(" + Math.round(c[0]) + "," + Math.round(c[1]) + "," + Math.round(c[2]) + ")"; }
+  function rgba(c, a) { return "rgba(" + Math.round(c[0]) + "," + Math.round(c[1]) + "," + Math.round(c[2]) + "," + a.toFixed(3) + ")"; }
+  function tone(o, row, rows) { return mix(TONE[o][0], TONE[o][1], Math.sin(Math.PI * (row + 0.5) / rows)); }
+
+  // ---------- easing ----------
+  function clamp(x) { return x < 0 ? 0 : x > 1 ? 1 : x; }
+  function eOut(x) { x = clamp(x); return 1 - Math.pow(1 - x, 3); }
+  function eIO(x) { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+  function lerp(a, b, k) { return a + (b - a) * k; }
+  function lerpR(a, b, k) { return { x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), w: lerp(a.w, b.w, k), h: lerp(a.h, b.h, k) }; }
+
+  // ---------- layout ----------
+  // Panels span y 60..960; cards start 200 px below a panel's top.
+  var BIG = { x: 120, y: 60, w: 1680, h: 900 };
+  var FIN = {
+    ai: { x: 80, y: 60, w: 1260, h: 900 },
+    human: { x: 1380, y: 60, w: 460, h: 900 }
+  };
+  var TOP = 260;
+  var STK = { w: 380, h: 96, f: 27 };
+  var STK0 = { x: 960 - 190, y: 542 }, STK1 = { x: 1420, y: TOP };
+
+  // Timeline (s): cards in 0.15..1.6, pile 2.5..3.1, panels 3.0..3.8, deal 3.85..5.5, humans spread 5.5..6.1,
+  // AI ticks 5.6..6.6, focus 6.7..7.4.
+  var T = { pile: 2.5, panel: 3.0, side: 3.25, deal: 3.85, spread: 5.5, tick: 5.6, focus: 6.7, product: 8.0 };
+
+  var idx = { ai: 0, human: 0 }, deal = 0;
+  CARDS.forEach(function (c, i) {
+    var k = idx[c.o]++;
+    c.g = { x: 160 + (i % 4) * (382 + 24), y: TOP + Math.floor(i / 4) * (116 + 20), w: 382, h: 116, f: 31 };
+    c.c0 = tone("human", Math.floor(i / 4), 5);
+    if (c.o === "ai") {
+      // 3 columns x 6 rows, filled column by column
+      c.fin = { x: 116 + Math.floor(k / 6) * (382 + 21), y: TOP + (k % 6) * (96 + 16), w: 382, h: 96, f: 27 };
+      c.c1 = tone("ai", k % 6, 6);
+      c.tt = T.tick + k * 0.055;
+    } else {
+      c.fin = { x: 1416, y: TOP + k * (160 + 24), w: 388, h: 160, f: 38 };
+      c.c1 = tone("human", k, 3);
+    }
+    c.k = k;
+    c.ap = 0.15 + i * 0.065;
+    c.rot = (((i * 37) % 7) - 3) * 0.9;
+    c.jx = (((i * 53) % 5) - 2) * 4;
+    if (c.o !== "human") { c.dj = deal++; c.dt = T.deal + c.dj * 0.075; }
+  });
+  var NDEAL = deal;
+  // pile level: human cards at the bottom, first card to be dealt on top
+  CARDS.forEach(function (c) {
+    c.lvl = c.o === "human" ? c.k : 3 + (NDEAL - 1 - c.dj);
+    c.st = T.pile + c.lvl * 0.02;
+  });
+
+  // ---------- DOM ----------
+  var $ = function (id) { return document.getElementById(id); };
+  var cardsEl = $("cards");
+  var SVGNS = "http://www.w3.org/2000/svg";
+  CARDS.forEach(function (c) {
+    var el = document.createElement("div"); el.className = "card";
+    var bx = document.createElement("div"); bx.className = "box";
+    if (c.o !== "human") {
+      var svg = document.createElementNS(SVGNS, "svg"); svg.setAttribute("viewBox", "0 0 24 24");
+      var path = document.createElementNS(SVGNS, "path"); path.setAttribute("d", "M4 12.5l5 5L20 6.5");
+      path.setAttribute("stroke", rgb(DEEP[c.o])); path.style.strokeDasharray = "24"; path.style.strokeDashoffset = "24";
+      svg.appendChild(path); bx.appendChild(svg); c.tick = path;
+    }
+    var lb = document.createElement("div"); lb.className = "lab"; lb.textContent = c.t;
+    el.appendChild(bx); el.appendChild(lb); cardsEl.appendChild(el);
+    c.el = el; c.lb = lb;
+  });
+  var stage = $("stage"), help = $("help"), product = $("product"), subs = $("subs");
+  var P = { human: $("p-human"), ai: $("p-ai") };
+  var N = { human: $("n-human"), ai: $("n-ai") };
+  var nameParam = params.get("name");
+  if (nameParam) product.textContent = nameParam;
+
+  function fit() {
+    var s = Math.min(window.innerWidth / 1920, window.innerHeight / 1080);
+    var ox = (window.innerWidth - 1920 * s) / 2, oy = (window.innerHeight - 1080 * s) / 2;
+    stage.style.transform = "translate(" + ox + "px," + oy + "px) scale(" + s + ")";
+  }
+  window.addEventListener("resize", fit); fit();
+
+  // counters pulse when their value changes
+  var CNT = {};
+  ["human", "ai"].forEach(function (k) { CNT[k] = { v: -1, at: -10 }; });
+  function setCount(k, v, t) {
+    var c = CNT[k];
+    if (v !== c.v) { if (c.v >= 0 && t > 0) c.at = t; c.v = v; N[k].textContent = String(v); }
+    var d = t - c.at, pulse = d >= 0 && d < 1 ? Math.exp(-d * 9) : 0;
+    N[k].style.transform = "scale(" + (1 + 0.14 * pulse).toFixed(4) + ")";
+  }
+
+  // ---------- render ----------
+  // the clear sleeve: a wide translucent ring around the white card
+  var SLEEVE = ", 0 0 0 1px rgba(255,255,255,0.9), 0 0 0 14px rgba(255,255,255,0.32), 0 0 0 15px rgba(255,255,255,0.7)";
+  function setPanel(el, r, op, dx, shadowExtra) {
+    var st = el.style;
+    st.transform = "translate(" + (r.x + dx).toFixed(2) + "px," + r.y.toFixed(2) + "px)";
+    st.width = r.w.toFixed(2) + "px"; st.height = r.h.toFixed(2) + "px";
+    st.opacity = op.toFixed(3);
+    st.boxShadow = "0 2px 4px rgba(38,34,31,0.08)" + SLEEVE + ", 0 34px 70px -30px rgba(38,34,31,0.45)" + (shadowExtra || "");
+  }
+
+  function render(t) {
+    var pm = eIO((t - T.panel) / 0.8);
+    var side = eOut((t - T.side) / 0.55);
+    var focus = eIO((t - T.focus) / 0.7);
+
+    var hr = lerpR(BIG, FIN.human, pm);
+    setPanel(P.human, hr, 1, 0, ", 0 0 0 " + (15 + 4 * focus).toFixed(2) + "px " + rgba(C.human, 0.5 * focus) +
+      ", 0 0 70px " + rgba(C.human, 0.22 * focus));
+    setPanel(P.ai, FIN.ai, side, -70 * (1 - side), ", 0 0 0 " + (15 + 4 * focus).toFixed(2) + "px " + rgba(DEEP.ai, 0.5 * focus) +
+      ", 0 0 70px " + rgba(DEEP.ai, 0.22 * focus));
+
+    var sp = { x: lerp(STK0.x, STK1.x, pm), y: lerp(STK0.y, STK1.y, pm) };
+    var shown = 0, landed = 0;
+
+    CARDS.forEach(function (c, i) {
+      var ap = clamp((t - c.ap) / 0.3), ea = eOut(ap);
+      if (ap > 0.5) shown++;
+      // grid -> pile
+      var sP = clamp((t - c.st) / 0.42), es = eIO(sP);
+      var pile = { x: sp.x + c.jx, y: sp.y - c.lvl * 1.6, w: STK.w, h: STK.h };
+      var r = lerpR(c.g, pile, es);
+      var f = lerp(c.g.f, STK.f, es), rot = c.rot * es;
+      r.y += (1 - ea) * 22 - Math.sin(Math.PI * sP) * 26;
+      var lift = Math.sin(Math.PI * sP);
+      // pile -> column
+      var d;
+      if (c.o === "human") d = clamp((t - T.spread - c.k * 0.07) / 0.5);
+      else d = clamp((t - c.dt) / 0.45);
+      var ed = eIO(d);
+      r = lerpR(r, c.fin, ed);
+      f = lerp(f, c.fin.f, ed); rot = lerp(rot, 0, ed);
+      r.y -= Math.sin(Math.PI * d) * (c.o === "human" ? 10 : 40);
+      lift = Math.max(lift, Math.sin(Math.PI * d));
+      if (c.o !== "human" && d >= 0.85) landed++;
+
+      var flying = (sP > 0 && sP < 1) || (d > 0 && d < 1);
+      var z = flying ? 200 + (c.o === "human" ? 0 : NDEAL - c.dj) : sP >= 1 && ed < 1 ? 20 + c.lvl : 10 + i;
+      if (sP >= 1 && d >= 1) z = 10 + i;
+
+      var bg = mix(c.c0, c.c1, ed), txt = C.ink, op = ea;
+      if (c.o === "human") {
+        bg = mix(bg, C.human, focus); txt = mix(C.ink, C.white, focus);
+      } else {
+        bg = mix(bg, DEEP.ai, focus); txt = mix(C.ink, C.white, focus);
+        // AI checks each result after the deal: tick draws in, card gives a small nudge
+        var tk = clamp((t - c.tt) / 0.22);
+        c.tick.style.strokeDashoffset = (24 * (1 - eOut(tk))).toFixed(2);
+        lift = Math.max(lift, 0.6 * Math.sin(Math.PI * tk));
+      }
+      var sc = 1 + 0.035 * lift;
+      var st = c.el.style;
+      st.transform = "translate(" + r.x.toFixed(2) + "px," + r.y.toFixed(2) + "px) rotate(" + rot.toFixed(2) + "deg) scale(" + sc.toFixed(4) + ")";
+      st.width = r.w.toFixed(2) + "px"; st.height = r.h.toFixed(2) + "px";
+      st.fontSize = f.toFixed(2) + "px";
+      st.background = rgb(bg);
+      st.opacity = op.toFixed(3);
+      st.zIndex = z;
+      st.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.55), 0 " +
+        (2 + 16 * lift).toFixed(1) + "px " + (6 + 26 * lift).toFixed(1) + "px -6px rgba(38,34,31," + (0.16 + 0.2 * lift).toFixed(3) + ")" +
+        ", 0 10px 30px -8px " + rgba(c.o === "human" ? C.human : DEEP.ai, 0.5 * focus);
+      c.lb.style.color = rgb(txt);
+    });
+
+    var hv = t < T.deal ? shown : 20 - landed;
+    setCount("human", hv, t);
+    setCount("ai", landed, t);
+    N.human.classList.toggle("drop", t >= T.deal && hv < 20);
+    N.ai.classList.toggle("lit", t >= T.focus);
+
+    var pn = nameParam ? eOut((t - T.product) / 0.7) : 0;
+    product.style.opacity = pn.toFixed(3);
+    product.style.transform = "translateY(" + ((1 - pn) * 12).toFixed(1) + "px)";
+    if (SUBS) {
+      var s1 = eOut((t - 0.8) / 0.4) * (1 - eOut((t - T.pile) / 0.3));
+      var s2 = eOut((t - T.focus) / 0.5) * (nameParam ? 1 - eOut((t - T.product + 0.3) / 0.3) : 1);
+      subs.textContent = t < T.panel ? SUB1 : SUB2;
+      subs.style.opacity = (t < T.panel ? s1 : s2).toFixed(3);
+    } else subs.style.opacity = "0";
+  }
+
+  // ---------- playback ----------
+  var REST = 2.3; // frame shown while idle: every task in the Human panel
+  var t = REST, playing = false, t0 = 0;
+  function now() { return performance.now() / 1000; }
+  function setIdle(on) { help.hidden = !on; document.body.classList.toggle("idle", on); }
+  function play(from) { t = from; t0 = now() - from; playing = true; setIdle(false); }
+  function togglePause() {
+    if (playing) { playing = false; return; }
+    if (t >= DUR) return;
+    t0 = now() - t; playing = true; setIdle(false);
+  }
+  function reset() { t = REST; playing = false; setIdle(true); }
+
+  function frame() {
+    if (playing) {
+      t = now() - t0;
+      if (t >= DUR) { t = DUR; playing = false; }
+    }
+    render(t);
+    requestAnimationFrame(frame);
+  }
+
+  window.addEventListener("keydown", function (ev) {
+    if (ev.key === "1") { play(0); ev.preventDefault(); }
+    else if (ev.key === "2") { play(T.pile - 0.4); ev.preventDefault(); }
+    else if (ev.key === " " || ev.code === "Space") { togglePause(); ev.preventDefault(); }
+    else if (ev.key === "r" || ev.key === "R") { reset(); ev.preventDefault(); }
+  });
+  $("btn1").addEventListener("click", function (ev) { ev.stopPropagation(); play(0); });
+  $("btn2").addEventListener("click", function (ev) { ev.stopPropagation(); play(T.pile - 0.4); });
+  $("viewport").addEventListener("click", function () { if (help.hidden) togglePause(); });
+
+  // URL params: autoplay=1, delay=<seconds>, t=<seconds> (freeze frame), subs=1, name=<product>
+  var pt = parseFloat(params.get("t"));
+  if (!isNaN(pt)) { t = Math.max(0, Math.min(DUR, pt)); setIdle(false); }
+  else setIdle(true);
+
+  function start() {
+    if (params.get("autoplay") === "1" && isNaN(pt)) {
+      var dl = parseFloat(params.get("delay")) || 0;
+      t = 0; setIdle(false);
+      setTimeout(function () { play(0); }, dl * 1000);
+    }
+    requestAnimationFrame(frame);
+  }
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(start, start); else start();
+})();
+</script>
