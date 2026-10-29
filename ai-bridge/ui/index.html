@@ -126,6 +126,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus
 main {
   flex: 1; min-height: 0; display: grid; gap: 12px; padding: 0 14px 14px;
   grid-template-columns: minmax(400px, 1.25fr) minmax(280px, .75fr) minmax(340px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
 }
 .col { min-height: 0; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
 .panel {
@@ -194,11 +195,15 @@ main {
 #taskPanel { flex: 1 1 auto; }
 /* timeline: phases holding tasks; only the current phase is open */
 #lyrics {
-  position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 38% 12px; margin: 0; list-style: none;
+  position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 0 12px; margin: 0; list-style: none;
   -webkit-mask-image: linear-gradient(transparent, #000 16%, #000 84%, transparent);
           mask-image: linear-gradient(transparent, #000 16%, #000 84%, transparent);
 }
-#lyrics.all { padding: 6px 12px 12px; -webkit-mask-image: none; mask-image: none; }
+#lyrics.all { -webkit-mask-image: none; mask-image: none; }
+/* Room above and below, so any row can scroll level with the camera's middle. Spacers rather
+   than padding, because padding would make the list taller than its panel. */
+#lyrics::before, #lyrics::after { content: ""; display: block; height: 60vh; }
+#lyrics::after { height: 100vh; }
 #lyrics .phase { position: relative; padding-left: 22px; transition: opacity .3s; }
 #lyrics .phase::before {
   content: ""; position: absolute; left: 5px; top: 14px; width: 10px; height: 10px; border-radius: 50%;
@@ -254,6 +259,39 @@ main {
 #lyrics .task-detail dd { margin: 0; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 #lyrics .task-detail dd.mono { font-size: 11.5px; max-height: 160px; overflow-y: auto; }
 #lyrics .more { font-size: 12px; color: var(--faint); padding: 2px 8px 2px 23px; }
+
+/* jog panel, in the sidebar */
+#jog { margin: 0 10px 8px; padding: 8px 4px 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; outline: none; }
+#jog:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 8px; }
+.jog-head { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
+.jog-head h2 { margin: 0; font-size: 14px; font-weight: 400; flex: 1; }
+.jog-pos { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; padding: 0 8px; font-size: 12px; color: var(--muted); }
+.jog-pos b { color: var(--faint); font-weight: 500; margin-right: 3px; }
+.jog-body { display: flex; justify-content: center; align-items: center; gap: 14px; }
+.jog-pad { display: grid; grid-template-columns: repeat(3, 38px); grid-template-rows: repeat(3, 38px); gap: 4px; }
+.jog-side { display: grid; grid-template-columns: 38px 38px; grid-template-rows: repeat(2, 38px); gap: 4px; }
+.jog-btn {
+  border: 0; border-radius: 8px; background: var(--hover); color: var(--fg); cursor: pointer; font-size: 16px;
+  display: grid; place-items: center; padding: 0; line-height: 1;
+}
+.jog-btn:hover { background: var(--active); }
+.jog-btn:active { background: var(--accent); color: var(--accent-fg); }
+.jog-btn:disabled { opacity: .35; cursor: default; background: var(--hover); color: var(--fg); }
+.jog-btn.safe { font-size: 11px; font-weight: 700; color: var(--accent); }
+.jog-btn small { font-size: 9px; color: var(--muted); display: block; }
+.jog-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; font-size: 12px; color: var(--muted); }
+#jogMsg { min-height: 1.2em; padding: 0 8px; font-size: 12px; color: var(--fail); }
+#jog.locked .jog-pad, #jog.locked .jog-side { filter: grayscale(1); }
+
+/* vision overlay on the live view */
+.cam .ovl { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cam .ovl .fresh { animation: ovIn .5s ease-out; }
+@keyframes ovIn { from { opacity: 0; } to { opacity: 1; } }
+.cam .ov-rect { fill: none; stroke: #57e389; stroke-width: 3; vector-effect: non-scaling-stroke; }
+.cam .ov-pin { fill: rgba(233,84,32,.25); stroke: #e95420; stroke-width: 3; vector-effect: non-scaling-stroke; }
+.cam .ov-text { fill: #57e389; font: 700 16px var(--font-ui); paint-order: stroke; stroke: rgba(0,0,0,.7); stroke-width: 4px; }
+.cam .ov-text.pin { fill: #ff8a5c; }
+.cam .vbadge { position: absolute; left: 8px; bottom: 8px; font-size: 12px; color: #fff; background: rgba(38,162,105,.85); padding: 2px 9px; border-radius: 6px; }
 
 /* parts, in the sidebar */
 #partsPanel { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0 10px; border-top: 1px solid var(--line); padding-top: 6px; }
@@ -379,6 +417,23 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       <span class="chip" id="cBusy"><i></i>Idle</span>
       <span id="cNozzles" style="display:contents"></span>
     </div>
+    <section id="jog" tabindex="0" aria-label="Jog">
+      <div class="jog-head"><h2>Jog</h2><div class="tabs" id="jogTool" role="group" aria-label="Tool to move"></div></div>
+      <div class="jog-pos mono" id="jogPos"></div>
+      <div class="jog-body">
+        <div class="jog-pad">
+          <span></span><button class="jog-btn" type="button" data-move="yp" title="Y+ (Up arrow)">▲</button><span></span>
+          <button class="jog-btn" type="button" data-move="xm" title="X− (Left arrow)">◀</button><button class="jog-btn safe" type="button" data-move="safe" title="Lift the head to Safe Z">SAFE<br>Z</button><button class="jog-btn" type="button" data-move="xp" title="X+ (Right arrow)">▶</button>
+          <span></span><button class="jog-btn" type="button" data-move="ym" title="Y− (Down arrow)">▼</button><span></span>
+        </div>
+        <div class="jog-side">
+          <button class="jog-btn" type="button" data-move="zp" title="Z+ (Page Up)">Z<small>▲</small></button><button class="jog-btn" type="button" data-move="cp" title="Rotate + (])">⟲</button>
+          <button class="jog-btn" type="button" data-move="zm" title="Z− (Page Down)">Z<small>▼</small></button><button class="jog-btn" type="button" data-move="cm" title="Rotate − ([)">⟳</button>
+        </div>
+      </div>
+      <div class="jog-foot"><span>Step, mm</span><div class="tabs" id="jogStep" role="group" aria-label="Step"></div></div>
+      <div id="jogMsg"></div>
+    </section>
     <div id="partsPanel">
       <div id="partsHead" role="button" tabindex="0" aria-expanded="false">
         <span class="caret">▸</span>
@@ -527,7 +582,10 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
         c.title = (n.nozzleTip || '') + ' Z ' + n.z;
         nz.appendChild(c);
       });
+      renderJog();
+      drawOverlays();
       renderTimeline();
+      realignTimeline();
     }).catch(function (e) {
       $('cMachine').className = 'chip bad';
       $('cMachine').textContent = 'OpenPnP not reachable';
@@ -571,8 +629,12 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       }
       else msg.textContent = 'Paused';
       d.appendChild(img); d.appendChild(el('div', 'cross')); d.appendChild(el('span', 'label', c.name)); d.appendChild(msg);
+      var ov = svg('svg', { 'class': 'ovl', preserveAspectRatio: 'xMidYMid meet' }, d);
+      ov.dataset.camera = c.name;
+      var vb = el('span', 'vbadge'); vb.hidden = true; d.appendChild(vb);
       box.appendChild(d);
     });
+    drawOverlays();
   }
   function renderCamTabs() {
     var t = $('camTabs'); t.innerHTML = '';
@@ -1079,9 +1141,149 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       if (isCur) cur = li;
       ol.appendChild(li);
     });
-    if (cur && Date.now() - userScrolledAt > 6000) {
-      ol.scrollTop = cur.offsetTop - ol.clientHeight / 2 + Math.min(cur.offsetHeight, ol.clientHeight * 0.6) / 2;
+    currentPhaseEl = cur;
+    realignTimeline();
+  }
+  // Keep the task in progress (or the current phase) level with the middle of the camera image.
+  var currentPhaseEl = null;
+  function realignTimeline() {
+    var cur = currentPhaseEl, ol = $('lyrics');
+    if (!cur || !cur.isConnected || Date.now() - userScrolledAt < 6000) return;
+    var target = cur.querySelector('.task.now .task-row') || cur.querySelector('.ph-head') || cur;
+    var olRect = ol.getBoundingClientRect(), tRect = target.getBoundingClientRect();
+    var cam = document.querySelector('#cams .cam');
+    var y = olRect.top + olRect.height / 2;
+    if (cam) {
+      var c = cam.getBoundingClientRect();
+      // Only when the camera is beside the list (not on narrow screens).
+      if (c.top + c.height / 2 > olRect.top + 30 && c.top + c.height / 2 < olRect.bottom - 30) y = c.top + c.height / 2;
     }
+    var delta = (tRect.top + tRect.height / 2) - y;
+    if (Math.abs(delta) > 1) ol.scrollTop += delta;
+  }
+  window.addEventListener('resize', realignTimeline);
+
+  // ------------------------------------------------------------------ jog
+  // Like OpenPnP's jog panel: move the camera or a nozzle by a step, or lift to Safe Z. Each press
+  // goes to the bridge, which refuses while the machine is not enabled, not homed or busy.
+  var JOG_STEPS = [0.1, 1, 10];
+  var JOG_ROT = { 0.1: 1, 1: 10, 10: 90 };
+  var jog = { tool: 'camera', step: 1, busy: false };
+  try {
+    var savedStep = Number(localStorage.getItem('ui.jogStep'));
+    if (JOG_STEPS.indexOf(savedStep) >= 0) jog.step = savedStep;
+  } catch (e) {}
+  function jogTools() {
+    var s = state.status || {}, list = [{ value: 'camera', name: 'Camera' }];
+    (s.nozzles || []).forEach(function (n) { list.push({ value: n.id, name: n.name }); });
+    return list;
+  }
+  function currentToolLocation() {
+    var s = state.status || {}, tools = s.tools || [];
+    var cam = (cams.find(function (c) { return c.looking === 'Down'; }) || {}).name;
+    var t = jog.tool === 'camera' ? tools.find(function (x) { return x.kind === 'camera' && x.name === cam; }) || tools.find(function (x) { return x.kind === 'camera'; })
+      : tools.find(function (x) { return x.id === jog.tool; });
+    return t && t.location;
+  }
+  function renderJog() {
+    var s = state.status || {};
+    var tt = $('jogTool'); tt.innerHTML = '';
+    jogTools().forEach(function (t) {
+      var b = el('button', null, t.name); b.type = 'button';
+      b.setAttribute('aria-pressed', String(jog.tool === t.value));
+      b.onclick = function () { jog.tool = t.value; renderJog(); };
+      tt.appendChild(b);
+    });
+    var st = $('jogStep'); st.innerHTML = '';
+    JOG_STEPS.forEach(function (v) {
+      var b = el('button', 'mono', String(v)); b.type = 'button';
+      b.title = v + ' mm, ' + JOG_ROT[v] + '° per press';
+      b.setAttribute('aria-pressed', String(jog.step === v));
+      b.onclick = function () { jog.step = v; try { localStorage.setItem('ui.jogStep', String(v)); } catch (e) {} renderJog(); };
+      st.appendChild(b);
+    });
+    var l = currentToolLocation();
+    $('jogPos').innerHTML = l ? ['X', 'Y', 'Z', 'C'].map(function (k, i) {
+      var v = [l.x, l.y, l.z, l.rotation][i];
+      return '<span><b>' + k + '</b>' + (v == null ? '—' : Number(v).toFixed(i === 3 ? 1 : 2)) + '</span>';
+    }).join('') : '';
+    var allowed = !!s.motionAllowed;
+    $('jog').classList.toggle('locked', !allowed);
+    $('jog').querySelectorAll('.jog-btn').forEach(function (b) { b.disabled = !allowed || jog.busy; });
+    if (!jog.msgUntil || Date.now() > jog.msgUntil) $('jogMsg').textContent = allowed ? '' : (s.motionRefusedBecause || 'Motion not allowed.');
+  }
+  function doJog(move) {
+    if (jog.busy) return;
+    var body = Object.assign({ tool: jog.tool }, move);
+    jog.busy = true; renderJog();
+    postJSON('/api/jog', body).then(function (r) {
+      if (r.status !== 'ok') { $('jogMsg').textContent = r.reason || r.error || 'Jog failed.'; jog.msgUntil = Date.now() + 5000; }
+    }).catch(function () { $('jogMsg').textContent = 'Jog failed.'; jog.msgUntil = Date.now() + 5000; })
+      .finally(function () { jog.busy = false; pollStatus(); });
+  }
+  $('jog').addEventListener('click', function (e) {
+    var b = e.target.closest('.jog-btn');
+    if (!b || b.disabled) return;
+    var s = jog.step, c = JOG_ROT[jog.step];
+    var m = { xp: { dx: s }, xm: { dx: -s }, yp: { dy: s }, ym: { dy: -s }, zp: { dz: s }, zm: { dz: -s },
+              cp: { dc: c }, cm: { dc: -c }, safe: { safeZ: true } }[b.dataset.move];
+    if (m) doJog(m);
+  });
+  // Keys work while the jog panel has focus: arrows for X/Y, Page Up/Down for Z, [ and ] to rotate.
+  $('jog').addEventListener('keydown', function (e) {
+    var map = { ArrowUp: 'yp', ArrowDown: 'ym', ArrowLeft: 'xm', ArrowRight: 'xp', PageUp: 'zp', PageDown: 'zm', '[': 'cm', ']': 'cp' };
+    var k = map[e.key];
+    if (!k) return;
+    e.preventDefault();
+    var b = $('jog').querySelector('[data-move="' + k + '"]');
+    if (b && !b.disabled) b.click();
+  });
+
+  // ------------------------------------------------------------------ vision overlay
+  // The last vision result of a camera, drawn over its live view while the camera stays put:
+  // result rectangles (e.g. the IC body) in green, pin 1 circles in orange.
+  function overlayFor(name) {
+    var s = state.status || {}, o = (s.visionOverlays || {})[name];
+    if (!o || !o.width) return null;
+    var tool = (s.tools || []).find(function (t) { return t.kind === 'camera' && t.name === name; });
+    var age = Date.now() - o.time;
+    if (tool && o.cameraLocation && tool.location) {
+      var dx = tool.location.x - o.cameraLocation.x, dy = tool.location.y - o.cameraLocation.y;
+      if (Math.hypot(dx, dy) > 0.3 || age > 600000) return null;
+    } else if (age > 30000) {
+      return null; // a camera that is not on the head: show the result for a while
+    }
+    return o;
+  }
+  function drawOverlays() {
+    document.querySelectorAll('#cams .ovl').forEach(function (ov) {
+      var name = ov.dataset.camera, o = overlayFor(name);
+      var key = o ? o.sequence : 0;
+      var badge = ov.parentNode.querySelector('.vbadge');
+      if (o) {
+        var secs = Math.round((Date.now() - o.time) / 1000);
+        badge.hidden = false;
+        badge.textContent = 'Vision · ' + (o.label || '') + ' · ' + o.rects.length + ' found' + (o.circles.length ? ' · pin 1' : '') + ' · ' + (secs < 60 ? secs + ' s' : Math.round(secs / 60) + ' min') + ' ago';
+      } else badge.hidden = true;
+      if (ov.dataset.seq === String(key)) return;
+      ov.dataset.seq = String(key);
+      ov.innerHTML = '';
+      if (!o) return;
+      ov.setAttribute('viewBox', '0 0 ' + o.width + ' ' + o.height);
+      var g = svg('g', { 'class': 'fresh' }, ov);
+      o.rects.forEach(function (r, i) {
+        var rg = svg('g', { transform: 'translate(' + r.x + ' ' + r.y + ') rotate(' + r.angle + ')' }, g);
+        svg('rect', { 'class': 'ov-rect', x: -r.width / 2, y: -r.height / 2, width: r.width, height: r.height }, rg);
+        svg('path', { 'class': 'ov-rect', d: 'M-8 0H8M0 -8V8' }, rg);
+        var t = svg('text', { 'class': 'ov-text', x: r.x - r.width / 2, y: r.y - Math.max(r.width, r.height) / 2 - 8 }, g);
+        t.textContent = o.rects.length > 1 ? 'part ' + (i + 1) : 'part';
+      });
+      o.circles.forEach(function (c) {
+        svg('circle', { 'class': 'ov-pin', cx: c.x, cy: c.y, r: Math.max(c.diameter / 2, 6) }, g);
+        var t = svg('text', { 'class': 'ov-text pin', x: c.x + Math.max(c.diameter / 2, 6) + 6, y: c.y + 5 }, g);
+        t.textContent = 'pin 1';
+      });
+    });
   }
 
   // ------------------------------------------------------------------ chat
@@ -1421,7 +1623,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     setBusy(s.busy);
   }).finally(function () {
     connect();
-    pollStatus(); setInterval(pollStatus, 2000);
+    pollStatus(); setInterval(pollStatus, 1000);
     loadCameras();
     pollLayout(); setInterval(pollLayout, 4000);
     pollActions(); setInterval(pollActions, 3000);

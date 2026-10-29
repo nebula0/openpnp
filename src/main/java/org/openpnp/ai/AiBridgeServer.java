@@ -186,6 +186,8 @@ public class AiBridgeServer {
      * State of the current or last bed map scan, null if there was none. Guarded by this.
      */
     private JsonObject bedMapScanState;
+    /** The web UI's view server, null if it did not start. */
+    private AiBridgeViewServer viewServer;
 
     /**
      * Starts the server if the aiBridge.port system property is set. Call once the Configuration
@@ -233,7 +235,7 @@ public class AiBridgeServer {
         // that they keep working while a long machine task holds the server above.
         Integer viewPort = null;
         try {
-            new AiBridgeViewServer(this, token, port + 1);
+            viewServer = new AiBridgeViewServer(this, token, port + 1);
             viewPort = port + 1;
         }
         catch (Exception e) {
@@ -321,6 +323,8 @@ public class AiBridgeServer {
                     return pickFeeder(body);
                 case "/machine/home":
                     return homeMachine(body);
+                case "/machine/jog":
+                    return AiBridgeJog.jog(this, body);
                 case "/nozzle/discard":
                     return discardPart(body);
                 case "/nozzle/calibrate":
@@ -564,6 +568,9 @@ public class AiBridgeServer {
                 }
                 o.addProperty("partsFound", parts.size());
                 o.add("parts", parts);
+                if (viewServer != null) {
+                    viewServer.publishVision(camera, pipeline, feeder.getName());
+                }
                 o.add("images", collectImages(pipeline, allStages));
                 Mat working = pipeline.getWorkingImage();
                 if (working != null) {
@@ -4576,7 +4583,7 @@ public class AiBridgeServer {
         return null;
     }
 
-    private String motionRefusal(Machine machine) throws Exception {
+    String motionRefusal(Machine machine) throws Exception {
         if (!machine.isEnabled()) {
             return "Machine is not enabled.";
         }
@@ -4661,7 +4668,7 @@ public class AiBridgeServer {
         return o;
     }
 
-    private <T> T runOnMachine(Machine machine, Callable<T> callable) throws Exception {
+    <T> T runOnMachine(Machine machine, Callable<T> callable) throws Exception {
         return runOnMachine(machine, callable, MACHINE_TASK_TIMEOUT_S);
     }
 

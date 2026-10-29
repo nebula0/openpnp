@@ -59,6 +59,20 @@ class Bridge:
         req = urllib.request.Request(url, headers={"X-AI-Bridge-Token": info["token"]})
         return urllib.request.urlopen(req, timeout=timeout)
 
+    def post(self, path, body, timeout=60):
+        """POST to the bridge itself (the server that runs machine tasks one at a time)."""
+        info = self.info()
+        if not info:
+            raise ConnectionError("OpenPnP is not running with the AI bridge.")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{info['port']}{path}", data=json.dumps(body).encode("utf-8"),
+            headers={"X-AI-Bridge-Token": info["token"], "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return json.loads(e.read() or b"{}") or {"status": "error", "error": str(e)}
+
 
 class Chat:
     """One Claude Code process in stream-json mode. Events from it, and the page's own events
@@ -320,6 +334,13 @@ def make_handler(bridge, chat, config_dir):
             url = urllib.parse.urlsplit(self.path)
             try:
                 body = self.read_body()
+                if url.path == "/api/jog":
+                    # The jog buttons: a person presses them, so this is not a chat action.
+                    allowed = {k: body[k] for k in ("tool", "dx", "dy", "dz", "dc", "safeZ") if k in body}
+                    try:
+                        return self.send_json(bridge.post("/machine/jog", allowed))
+                    except (OSError, ConnectionError, ValueError) as e:
+                        return self.send_json({"status": "error", "error": f"Cannot reach OpenPnP: {e}"}, 502)
                 if url.path == "/api/chat/send":
                     text = (body.get("text") or "").strip()
                     if not text:

@@ -95,6 +95,10 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 - [x] 計畫同步到 Task 時間軸（10/29，讓 Claude 呼叫 `update_plan` 實測過）
 - [x] Task 時間軸改成兩層（10/29，使用者要求）：第一層是階段（Setup、Feeders、Vision、Boards、Place、Inspect、Rework、Plan、Machine），第二層是 task。過去的階段來自動作紀錄，同一種動作連續出現就併在一起；`nozzle/discard`、`camera/move` 歸到當時所在的階段。現在的階段是正在跑的機器工具，或計畫裡 in_progress 的那一步（依字詞判斷階段，見 `phaseOfText`）。之後的階段是計畫裡 pending 的步驟，沒有計畫時是 job 裡還沒放的零件。只有現在的階段展開並高亮；點收合的階段可以暫時打開；「Expand all」全部打開。每個 task 只顯示短標籤，hover 出現 Details 按鈕，按了顯示時間、原因、結果和參數
 - [x] 介面文字改成英文（10/29）。對 Claude 的系統提示也改成英文，請它用使用者的語言回覆
+- [x] Jog 面板（10/29，在側欄）：Camera／各吸嘴、X/Y 方向、Z 升降、旋轉、SAFE Z、步距 0.1／1／10 mm（旋轉 1／10／90°）、目前位置。焦點在面板上時可用方向鍵、Page Up/Down、[ ]。Java 新增 `AiBridgeJog`（`POST /machine/jog`，走主 server，跟 GUI 的 jog 一樣做 board protection 檢查、用 JogMotion），沒啟用、沒歸零、忙碌、job 執行中時拒絕；一次最多 XY 50 mm、Z 10 mm、180°。人按的按鈕，所以不用 confirm、不寫動作紀錄。ui_server 用 `POST /api/jog` 轉過去。模擬機上測過
+- [x] 頂部視覺疊圖（10/29）：`inspect_feeder` 跑完 pipeline 後，view server 存下結果的 RotatedRect（IC 本體，綠框）和名稱含 pin1 的 stage 找到的圓（pin 1，橘圈），連同當時相機的位置；`/status` 的 `visionOverlays` 帶給介面，疊在即時畫面上。相機移開 0.3 mm 以上或過了 10 分鐘就不畫。模擬機上用 Sim-Loose-1 測過（6 個框都對在零件上）
+- [x] Task 對齊（10/29）：進行中的 task（沒有就用目前階段的標題）捲到跟相機畫面中心同高。清單上下用 ::before/::after 撐出捲動空間（用 padding 會把清單撐得比面板高，就捲不動）
+- [ ] 重新打包（jog 和疊圖要新的 jar），再上真機確認
 - [ ] 真機測試：用介面的對話實際操作一次（例如讓 Claude 歸零、掃 QR），確認核准按鈕和時間軸的「現在」
 - [ ] 第三階段
 

@@ -28,12 +28,15 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 
 import javax.imageio.ImageIO;
 
+import org.opencv.core.Mat;
+import org.opencv.core.RotatedRect;
 import org.openpnp.CameraListener;
 import org.openpnp.gui.MainFrame;
 import org.openpnp.model.BoardLocation;
@@ -47,7 +50,13 @@ import org.openpnp.model.Package;
 import org.openpnp.model.Part;
 import org.openpnp.model.Placement;
 import org.openpnp.spi.Camera;
+import org.openpnp.spi.Head;
+import org.openpnp.spi.HeadMountable;
+import org.openpnp.spi.Nozzle;
 import org.openpnp.util.Utils2D;
+import org.openpnp.util.VisionUtils;
+import org.openpnp.vision.pipeline.CvPipeline;
+import org.openpnp.vision.pipeline.CvStage;
 import org.pmw.tinylog.Logger;
 
 import com.google.gson.Gson;
@@ -59,7 +68,7 @@ import com.sun.net.httpserver.HttpServer;
 
 /**
  * Read-only endpoints for the AI bridge web UI: live camera frames, the job's board layout and the
- * machine status. Unlike {@link AiBridgeServer}, which runs requests one at a time so that machine
+ * machine status with the head's positions and the last vision results. Unlike {@link AiBridgeServer}, which runs requests one at a time so that machine
  * tasks never overlap, this server answers on its own threads, so the camera keeps streaming while
  * a long machine task is running. Nothing here moves the machine or changes the configuration.
  *
@@ -76,6 +85,9 @@ class AiBridgeViewServer {
                                                .create();
     /** Latest frame per camera, by camera id. */
     private final Map<String, Frames> frames = new ConcurrentHashMap<>();
+    /** Latest vision result to draw over each camera's live view, by camera name. */
+    private final Map<String, JsonObject> overlays = new ConcurrentHashMap<>();
+    private long overlaySequence;
 
     AiBridgeViewServer(AiBridgeServer bridge, String token, int port) throws IOException {
         this.bridge = bridge;
@@ -113,6 +125,10 @@ class AiBridgeViewServer {
                     JsonObject status = bridge.getStatus();
                     status.add("nozzles", bridge.getNozzles()
                                                 .get("nozzles"));
+                    status.add("tools", getTools());
+                    JsonObject o = new JsonObject();
+                    overlays.forEach(o::add);
+                    status.add("visionOverlays", o);
                     sendJson(exchange, 200, status);
                     return;
                 case "/cameras":
@@ -313,6 +329,106 @@ class AiBridgeViewServer {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             ImageIO.write(img, "jpg", out);
             return out.toByteArray();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Head positions and vision results
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * Where the cameras and nozzles of each head are, in mm, for the jog panel.
+     */
+    private static JsonArray getTools() {
+        JsonArray tools = new JsonArray();
+        for (Head head : Configuration.get()
+                                      .getMachine()
+                                      .getHeads()) {
+            for (Camera camera : head.getCameras()) {
+                tools.add(tool(camera, "camera"));
+            }
+            for (Nozzle nozzle : head.getNozzles()) {
+                tools.add(tool(nozzle, "nozzle"));
+            }
+        }
+        return tools;
+    }
+
+    private static JsonObject tool(HeadMountable hm, String kind) {
+        JsonObject t = new JsonObject();
+        t.addProperty("id", hm.getId());
+        t.addProperty("name", hm.getName());
+        t.addProperty("kind", kind);
+        t.add("location", AiBridgeServer.toJson(hm.getLocation()
+                                                  .convertToUnits(LengthUnit.Millimeters)));
+        return t;
+    }
+
+    /**
+     * Keeps what a vision pipeline found, in the camera's pixels, to draw over its live view:
+     * the result rectangles (e.g. an IC body) and the circles of stages that find circles (e.g.
+     * the pin 1 dimple). Together with where the camera was, so the page can drop it once the
+     * camera has moved.
+     */
+    void publishVision(Camera camera, CvPipeline pipeline, String label) {
+        try {
+            JsonObject o = new JsonObject();
+            Mat working = pipeline.getWorkingImage();
+            o.addProperty("sequence", ++overlaySequence);
+            o.addProperty("time", System.currentTimeMillis());
+            o.addProperty("camera", camera.getName());
+            o.addProperty("label", label);
+            o.addProperty("width", working == null ? 0 : working.cols());
+            o.addProperty("height", working == null ? 0 : working.rows());
+            o.add("cameraLocation", AiBridgeServer.toJson(camera.getLocation()
+                                                                .convertToUnits(
+                                                                        LengthUnit.Millimeters)));
+            JsonArray rects = new JsonArray();
+            CvStage.Result results = pipeline.getResult(VisionUtils.PIPELINE_RESULTS_NAME);
+            if (results != null && results.getModel() instanceof List) {
+                for (Object model : (List<?>) results.getModel()) {
+                    if (model instanceof RotatedRect) {
+                        RotatedRect r = (RotatedRect) model;
+                        JsonObject j = new JsonObject();
+                        j.addProperty("x", AiBridgeServer.round(r.center.x));
+                        j.addProperty("y", AiBridgeServer.round(r.center.y));
+                        j.addProperty("width", AiBridgeServer.round(r.size.width));
+                        j.addProperty("height", AiBridgeServer.round(r.size.height));
+                        j.addProperty("angle", AiBridgeServer.round(r.angle));
+                        rects.add(j);
+                    }
+                }
+            }
+            o.add("rects", rects);
+            JsonArray circles = new JsonArray();
+            for (CvStage stage : pipeline.getStages()) {
+                if (!stage.isEnabled() || stage.getName() == null
+                        || !stage.getName()
+                                 .toLowerCase()
+                                 .contains("pin1")) {
+                    continue;
+                }
+                CvStage.Result r = pipeline.getResult(stage);
+                if (r == null || !(r.getModel() instanceof List)) {
+                    continue;
+                }
+                for (Object model : (List<?>) r.getModel()) {
+                    if (model instanceof CvStage.Result.Circle) {
+                        CvStage.Result.Circle c = (CvStage.Result.Circle) model;
+                        JsonObject j = new JsonObject();
+                        j.addProperty("x", AiBridgeServer.round(c.getX()));
+                        j.addProperty("y", AiBridgeServer.round(c.getY()));
+                        j.addProperty("diameter", AiBridgeServer.round(c.getDiameter()));
+                        j.addProperty("stage", stage.getName());
+                        circles.add(j);
+                    }
+                }
+            }
+            o.add("circles", circles);
+            overlays.put(camera.getName(), o);
+        }
+        catch (Exception e) {
+            Logger.warn(e, "AI bridge could not keep the vision result for the web UI");
         }
     }
 
