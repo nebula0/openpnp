@@ -91,7 +91,14 @@ def list_nozzles() -> str:
 
 
 @mcp.tool()
-def inspect_feeder(feeder_id: str, reason: str, confirm: bool = False, all_stages: bool = False) -> list:
+def inspect_feeder(
+    feeder_id: str,
+    reason: str,
+    confirm: bool = False,
+    all_stages: bool = False,
+    stage_overrides: dict | None = None,
+    apply: bool = False,
+) -> list:
     """Move the top camera over a ReferenceLoosePartFeeder and run its vision pipeline, without picking.
 
     Returns how many parts were found, their locations, and the result image
@@ -99,8 +106,16 @@ def inspect_feeder(feeder_id: str, reason: str, confirm: bool = False, all_stage
     without confirm to get the plan, ask the user, and only then call again with
     confirm=true. feeder_id may be the feeder id or its unique name. Afterwards all
     heads are lifted to Safe Z; safeZAfter reports whether that worked.
+
+    stage_overrides tunes the pipeline for this run only, as {stage name: {property: value}},
+    e.g. {"body_threshold": {"threshold": 30}, "pin1_circle": {"min-diameter": 70,
+    "max-diameter": 130}}; property names as in the pipeline XML (or camelCase). The stages get
+    their values back afterwards, so several values can be tried in a row. With apply=true the
+    values are kept instead (saved to the config when OpenPnP closes); the result's
+    stageOverrides shows each value before and after.
     """
-    body = {"feederId": feeder_id, "confirm": confirm, "allStages": all_stages, "reason": reason}
+    body = {"feederId": feeder_id, "confirm": confirm, "allStages": all_stages,
+            "stageOverrides": stage_overrides, "apply": apply, "reason": reason}
     return _with_images(_call("POST", "/feeder/inspect", body=body))
 
 
@@ -462,6 +477,7 @@ def test_bottom_vision(
     nozzle_id: str | None = None,
     rotation: float = 0,
     threshold: int | None = None,
+    light: bool | None = None,
 ) -> list:
     """Run the bottom vision of the part on a nozzle once, without placing it.
 
@@ -471,14 +487,16 @@ def test_bottom_vision(
     job would apply: disabled, ok or why the part would be rejected), plus the camera image, the
     Threshold stage output
     and the final image, also when nothing was found. threshold overrides the Threshold stages for
-    this run only (nothing is saved), so several values can be tried with the same part. The part
+    this run only (nothing is saved), so several values can be tried with the same part; light
+    (true: the bottom camera's default light, false: off) does the same for the lighting. The
+    result's light shows what was used. The part
     stays on the nozzle: pick it first with pick_from_feeder(return_part=False), discard it after.
 
     MOVES THE MACHINE: first call without confirm to get the plan, ask the user, and only then
     call again with confirm=true.
     """
     body = {"nozzleId": nozzle_id, "rotation": rotation, "threshold": threshold,
-            "confirm": confirm, "reason": reason}
+            "light": light, "confirm": confirm, "reason": reason}
     return _with_images(_call("POST", "/vision/bottom/test", body=body))
 
 
@@ -516,21 +534,24 @@ def update_part(
     height: float | None = None,
     name: str | None = None,
     bottom_vision_threshold: int | None = None,
+    bottom_vision_light: bool | None = None,
     check_part_size: str | None = None,
     check_size_tolerance_percent: int | None = None,
 ) -> str:
     """Set a part's height (mm, top of the part above the board), name (e.g. its manufacturer or
     LCSC part number) and/or bottom vision settings. Does not move the machine.
 
-    Bottom vision: threshold (0-255), check_part_size (Disabled, BodySize or PadExtents: reject
+    Bottom vision: threshold (0-255), light (true: the camera's default light, false: off),
+    check_part_size (Disabled, BodySize or PadExtents: reject
     a part whose measured size is off its footprint by more than check_size_tolerance_percent,
     which also catches an empty nozzle) and the tolerance. With any of these the part gets bottom
     vision settings of its own, a copy of those it inherits (usually its package's), if it has
     none yet; its package and other parts keep theirs. Find the values with
-    test_bottom_vision(threshold=...) first (its sizeCheck shows the check's verdict). The result
+    test_bottom_vision(threshold=..., light=...) first (its sizeCheck shows the check's verdict). The result
     shows the values before and after."""
     body = {"partId": part_id, "height": height, "name": name,
-            "bottomVisionThreshold": bottom_vision_threshold, "checkPartSize": check_part_size,
+            "bottomVisionThreshold": bottom_vision_threshold,
+            "bottomVisionLight": bottom_vision_light, "checkPartSize": check_part_size,
             "checkSizeTolerancePercent": check_size_tolerance_percent, "reason": reason}
     return json.dumps(_call("POST", "/part/update", body=body), ensure_ascii=False, indent=1)
 
@@ -540,15 +561,17 @@ def update_package(
     package_id: str,
     reason: str,
     bottom_vision_threshold: int | None = None,
+    bottom_vision_light: bool | None = None,
     check_part_size: str | None = None,
     check_size_tolerance_percent: int | None = None,
 ) -> str:
-    """Change the bottom vision settings of a package (threshold, check_part_size: Disabled,
+    """Change the bottom vision settings of a package (threshold, light: true for the camera's
+    default light or false for off, check_part_size: Disabled,
     BodySize or PadExtents, and its tolerance in percent), used by its parts that have no
     settings of their own (partsInheriting in the result). If the package shares its settings
     with others, it gets a copy of its own first. Does not move the machine."""
     body = {"packageId": package_id, "bottomVisionThreshold": bottom_vision_threshold,
-            "checkPartSize": check_part_size,
+            "bottomVisionLight": bottom_vision_light, "checkPartSize": check_part_size,
             "checkSizeTolerancePercent": check_size_tolerance_percent, "reason": reason}
     return json.dumps(_call("POST", "/package/update", body=body), ensure_ascii=False, indent=1)
 

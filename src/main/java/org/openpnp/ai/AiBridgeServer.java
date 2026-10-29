@@ -65,6 +65,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.imageio.ImageIO;
 import javax.swing.SwingUtilities;
 
+import org.apache.commons.beanutils.PropertyUtils;
 import org.apache.commons.io.IOUtils;
 import org.opencv.core.CvType;
 import org.opencv.core.Mat;
@@ -465,7 +466,11 @@ public class AiBridgeServer {
      * Moves the head's default (down looking) camera over the feeder and runs the feeder's vision
      * pipeline without picking. Reports how many parts were found and returns images.
      *
-     * Body: {feederId, confirm, allStages (optional, default false)}
+     * Body: {feederId, confirm, allStages (optional, default false), stageOverrides (optional,
+     * e.g. {"body_threshold": {"threshold": 30}, "pin1_circle": {"min-diameter": 24}}), apply
+     * (optional, default false)}. The overrides are used for this run only and the stages get
+     * their values back afterwards, unless apply is true: then they are kept, as if changed in
+     * the pipeline editor.
      */
     private JsonObject inspectFeeder(JsonObject body) throws Exception {
         Machine machine = Configuration.get()
@@ -478,12 +483,20 @@ public class AiBridgeServer {
         }
         ReferenceLoosePartFeeder looseFeeder = (ReferenceLoosePartFeeder) feeder;
         boolean allStages = getBoolean(body, "allStages", false);
+        boolean apply = getBoolean(body, "apply", false);
+        List<StageOverride> overrides =
+                stageOverrides(looseFeeder.getPipeline(), body.get("stageOverrides"));
         Location feederLocation = looseFeeder.getLocation();
 
+        String overridesPlan = "";
+        if (!overrides.isEmpty()) {
+            overridesPlan = " Pipeline values " + (apply ? "changed and kept" : "for this run only")
+                    + ": " + describeOverrides(overrides) + ".";
+        }
         JsonObject gate = gateMotion(machine, body,
                 "Move the top camera to feeder " + feeder.getName() + " at "
                         + format(feederLocation) + " (at safe Z) and run its vision pipeline. "
-                        + "No pick.");
+                        + "No pick." + overridesPlan);
         if (gate != null) {
             return gate;
         }
@@ -504,10 +517,29 @@ public class AiBridgeServer {
                 pipeline.setProperty("nozzle", nozzle);
                 pipeline.setProperty("feeder", feeder);
                 try {
+                    for (StageOverride override : overrides) {
+                        override.set();
+                    }
                     pipeline.process();
                 }
                 catch (Exception e) {
                     o.addProperty("pipelineError", describe(e));
+                }
+                finally {
+                    // The feeder's own pipeline, not a copy: put its values back.
+                    if (!apply) {
+                        for (StageOverride override : overrides) {
+                            override.restore();
+                        }
+                    }
+                }
+                if (!overrides.isEmpty()) {
+                    JsonArray changed = new JsonArray();
+                    for (StageOverride override : overrides) {
+                        changed.add(override.toJson());
+                    }
+                    o.add("stageOverrides", changed);
+                    o.addProperty("applied", apply);
                 }
                 JsonArray parts = new JsonArray();
                 CvStage.Result results = pipeline.getResult(VisionUtils.PIPELINE_RESULTS_NAME);
@@ -544,6 +576,149 @@ public class AiBridgeServer {
             }
             return o;
         });
+    }
+
+    /**
+     * One property of a pipeline stage set to another value, e.g. body_threshold.threshold = 30.
+     */
+    private static class StageOverride {
+        final CvStage stage;
+        final String property;
+        final Object value;
+        final Object before;
+
+        StageOverride(CvStage stage, String property, Object value) throws Exception {
+            this.stage = stage;
+            this.property = property;
+            this.value = value;
+            this.before = PropertyUtils.getProperty(stage, property);
+        }
+
+        void set() throws Exception {
+            PropertyUtils.setProperty(stage, property, value);
+        }
+
+        void restore() {
+            try {
+                PropertyUtils.setProperty(stage, property, before);
+            }
+            catch (Exception e) {
+                Logger.warn(e, "AI bridge could not restore {}.{} to {}", stage.getName(),
+                        property, before);
+            }
+        }
+
+        JsonObject toJson() {
+            JsonObject o = new JsonObject();
+            o.addProperty("stage", stage.getName());
+            o.addProperty("property", property);
+            o.addProperty("before", String.valueOf(before));
+            o.addProperty("value", String.valueOf(value));
+            return o;
+        }
+
+        @Override
+        public String toString() {
+            return stage.getName() + "." + property + " " + before + " -> " + value;
+        }
+    }
+
+    /**
+     * Reads {stageName: {property: value}}. Properties may be written as in the XML (min-diameter)
+     * or as bean properties (minDiameter). Numbers, booleans, strings and enums are supported.
+     */
+    private static List<StageOverride> stageOverrides(CvPipeline pipeline, JsonElement json)
+            throws Exception {
+        List<StageOverride> overrides = new ArrayList<>();
+        if (json == null || json.isJsonNull()) {
+            return overrides;
+        }
+        if (!json.isJsonObject()) {
+            throw new BadRequest("stageOverrides must be an object: {stageName: {property: value}}.");
+        }
+        for (Map.Entry<String, JsonElement> s : json.getAsJsonObject()
+                                                    .entrySet()) {
+            CvStage stage = pipeline.getStage(s.getKey());
+            if (stage == null) {
+                List<String> names = new ArrayList<>();
+                for (CvStage st : pipeline.getStages()) {
+                    names.add(st.getName());
+                }
+                throw new BadRequest("No stage " + s.getKey() + " in the pipeline. Stages: "
+                        + String.join(", ", names) + ".");
+            }
+            if (!s.getValue()
+                  .isJsonObject()) {
+                throw new BadRequest("stageOverrides." + s.getKey()
+                        + " must be an object: {property: value}.");
+            }
+            for (Map.Entry<String, JsonElement> p : s.getValue()
+                                                     .getAsJsonObject()
+                                                     .entrySet()) {
+                String property = camelCase(p.getKey());
+                if (!PropertyUtils.isReadable(stage, property)
+                        || !PropertyUtils.isWriteable(stage, property)) {
+                    throw new BadRequest("Stage " + stage.getName() + " ("
+                            + stage.getClass()
+                                   .getSimpleName()
+                            + ") has no property " + p.getKey() + ".");
+                }
+                Class<?> type = PropertyUtils.getPropertyType(stage, property);
+                overrides.add(new StageOverride(stage, property,
+                        convert(p.getValue(), type, stage.getName() + "." + p.getKey())));
+            }
+        }
+        return overrides;
+    }
+
+    private static String camelCase(String name) {
+        StringBuilder sb = new StringBuilder();
+        boolean upper = false;
+        for (char c : name.toCharArray()) {
+            if (c == '-' || c == '_') {
+                upper = true;
+            }
+            else {
+                sb.append(upper ? Character.toUpperCase(c) : c);
+                upper = false;
+            }
+        }
+        return sb.toString();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static Object convert(JsonElement value, Class<?> type, String what)
+            throws BadRequest {
+        try {
+            if (type == int.class || type == Integer.class) {
+                return value.getAsInt();
+            }
+            if (type == double.class || type == Double.class) {
+                return value.getAsDouble();
+            }
+            if (type == boolean.class || type == Boolean.class) {
+                return value.getAsBoolean();
+            }
+            if (type == String.class) {
+                return value.getAsString();
+            }
+            if (type.isEnum()) {
+                return Enum.valueOf((Class<Enum>) type, value.getAsString());
+            }
+        }
+        catch (RuntimeException e) {
+            throw new BadRequest(what + ": " + value + " is not a valid " + type.getSimpleName()
+                    + ".");
+        }
+        throw new BadRequest(what + " is a " + type.getSimpleName() + ", which can't be set here.");
+    }
+
+    private static String describeOverrides(List<StageOverride> overrides) {
+        List<String> parts = new ArrayList<>();
+        for (StageOverride override : overrides) {
+            parts.add(override.toString());
+        }
+        return String.join(", ", parts);
     }
 
     /**
@@ -1325,6 +1500,7 @@ public class AiBridgeServer {
         v.addProperty("settingsName", settings.getName());
         v.addProperty("own", holder.getBottomVisionSettings() == settings);
         v.add("thresholds", thresholdsOf(settings));
+        v.addProperty("light", lightOf(settings.getPipeline()));
         v.addProperty("checkPartSize", settings.getCheckPartSizeMethod()
                                                .toString());
         v.addProperty("checkSizeTolerancePercent", settings.getCheckSizeTolerancePercent());
@@ -1343,11 +1519,38 @@ public class AiBridgeServer {
     }
 
     /**
+     * @return the lighting of the enabled ImageCapture stages of a pipeline: "on" (the camera's
+     *         default light), "off", another light value, or "mixed" if the stages differ.
+     */
+    private static String lightOf(CvPipeline pipeline) {
+        String light = null;
+        for (CvStage stage : pipeline.getStages()) {
+            if (stage instanceof ImageCapture && stage.isEnabled()) {
+                ImageCapture capture = (ImageCapture) stage;
+                String l = capture.isDefaultLight() ? "on"
+                        : Boolean.FALSE.equals(capture.getLight()) ? "off"
+                                : String.valueOf(capture.getLight());
+                light = light == null || light.equals(l) ? l : "mixed";
+            }
+        }
+        return light;
+    }
+
+    /**
+     * Turns the light of an ImageCapture stage on (the camera's default light) or off.
+     */
+    private static void setCaptureLight(ImageCapture capture, boolean on) {
+        capture.setDefaultLight(on);
+        capture.setLight(on ? null : Boolean.FALSE);
+    }
+
+    /**
      * Sets a part's height, name (e.g. its manufacturer or LCSC part number) and/or bottom vision
      * settings. Does not move the machine.
      *
-     * Body: {partId, height (mm), name, bottomVisionThreshold (0-255), checkPartSize (Disabled,
-     * BodySize, PadExtents), checkSizeTolerancePercent}. With a vision change, the part gets
+     * Body: {partId, height (mm), name, bottomVisionThreshold (0-255), bottomVisionLight (true:
+     * the camera's default light, false: off), checkPartSize (Disabled, BodySize, PadExtents),
+     * checkSizeTolerancePercent}. With a vision change, the part gets
      * settings of its own if it has none yet: a copy of those it inherits, named after the part,
      * as the Specialize button in the GUI does. The threshold applies to all enabled Threshold
      * stages of its pipeline.
@@ -1367,8 +1570,8 @@ public class AiBridgeServer {
         String name = getString(body, "name");
         VisionChange vision = new VisionChange(body);
         if (Double.isNaN(height) && name == null && !vision.any()) {
-            throw new BadRequest("Give height, name, bottomVisionThreshold, checkPartSize "
-                    + "and/or checkSizeTolerancePercent.");
+            throw new BadRequest("Give height, name, bottomVisionThreshold, bottomVisionLight, "
+                    + "checkPartSize and/or checkSizeTolerancePercent.");
         }
         JsonObject o = ok();
         o.add("before", partJson(part));
@@ -1396,7 +1599,8 @@ public class AiBridgeServer {
      * Changes the bottom vision settings of a package, which its parts inherit unless they have
      * settings of their own. Does not move the machine.
      *
-     * Body: {packageId, bottomVisionThreshold (0-255), checkPartSize, checkSizeTolerancePercent}.
+     * Body: {packageId, bottomVisionThreshold (0-255), bottomVisionLight, checkPartSize,
+     * checkSizeTolerancePercent}.
      * As for a part, the package gets settings of its own first if it shares them with others.
      */
     private JsonObject updatePackage(JsonObject body) throws Exception {
@@ -1409,8 +1613,8 @@ public class AiBridgeServer {
         }
         VisionChange vision = new VisionChange(body);
         if (!vision.any()) {
-            throw new BadRequest("Give bottomVisionThreshold, checkPartSize and/or "
-                    + "checkSizeTolerancePercent.");
+            throw new BadRequest("Give bottomVisionThreshold, bottomVisionLight, checkPartSize "
+                    + "and/or checkSizeTolerancePercent.");
         }
         JsonObject o = ok();
         o.addProperty("packageId", pkg.getId());
@@ -1448,15 +1652,18 @@ public class AiBridgeServer {
 
     /**
      * The bottom vision changes asked for in a body: bottomVisionThreshold (0-255),
-     * checkPartSize (Disabled, BodySize or PadExtents) and checkSizeTolerancePercent.
+     * bottomVisionLight (true: the camera's default light, false: off), checkPartSize (Disabled,
+     * BodySize or PadExtents) and checkSizeTolerancePercent.
      */
     private static class VisionChange {
         int threshold;
+        Boolean light;
         PartSizeCheckMethod checkMethod;
         int tolerancePercent = -1;
 
         VisionChange(JsonObject body) throws BadRequest {
             threshold = getThreshold(body);
+            light = getOptionalBoolean(body, "bottomVisionLight");
             String method = getString(body, "checkPartSize");
             if (method != null) {
                 try {
@@ -1477,7 +1684,8 @@ public class AiBridgeServer {
         }
 
         boolean any() {
-            return threshold >= 0 || checkMethod != null || tolerancePercent >= 0;
+            return threshold >= 0 || light != null || checkMethod != null
+                    || tolerancePercent >= 0;
         }
     }
 
@@ -1522,6 +1730,20 @@ public class AiBridgeServer {
                         + "\" has no enabled Threshold stage.");
             }
         }
+        if (change.light != null) {
+            boolean found = false;
+            for (CvStage stage : settings.getPipeline()
+                                         .getStages()) {
+                if (stage instanceof ImageCapture && stage.isEnabled()) {
+                    setCaptureLight((ImageCapture) stage, change.light);
+                    found = true;
+                }
+            }
+            if (!found) {
+                throw new Exception("The bottom vision pipeline \"" + settings.getName()
+                        + "\" has no enabled ImageCapture stage.");
+            }
+        }
         if (change.checkMethod != null) {
             settings.setCheckPartSizeMethod(change.checkMethod);
         }
@@ -1540,7 +1762,8 @@ public class AiBridgeServer {
      * found. The part stays on the nozzle.
      *
      * Body: {nozzleId (optional, default the nozzle holding a part), rotation (degrees, default
-     * 0), threshold (optional, overrides the Threshold stages for this run only), confirm}
+     * 0), threshold (optional, overrides the Threshold stages for this run only), light
+     * (optional, true: the camera's default light, false: off, for this run only), confirm}
      */
     private JsonObject testBottomVision(JsonObject body) throws Exception {
         Machine machine = Configuration.get()
@@ -1575,6 +1798,7 @@ public class AiBridgeServer {
         if (!Double.isNaN(thresholdValue) && (thresholdValue < 0 || thresholdValue > 255)) {
             throw new BadRequest("threshold must be between 0 and 255.");
         }
+        Boolean lightValue = getOptionalBoolean(body, "light");
         ReferenceBottomVision bottomVision = ReferenceBottomVision.getDefault();
         BottomVisionSettings settings = bottomVision.getInheritedVisionSettings(part);
         Camera camera = VisionUtils.getBottomVisionCamera();
@@ -1585,6 +1809,8 @@ public class AiBridgeServer {
                 + ", run the bottom vision \"" + settings.getName() + "\""
                 + (Double.isNaN(thresholdValue) ? ""
                         : " with threshold " + (int) thresholdValue + " for this run only")
+                + (lightValue == null ? ""
+                        : " with the light " + (lightValue ? "on" : "off") + " for this run only")
                 + " and lift to Safe Z. The part stays on the nozzle, nothing is placed.");
         if (gate != null) {
             return gate;
@@ -1605,10 +1831,22 @@ public class AiBridgeServer {
                 bottomVision.preparePipeline(pipeline, settings.getPipelineParameterAssignments(),
                         camera, part.getPackage(), visionNozzle, visionNozzle.getNozzleTip(),
                         wanted, wanted, settings);
-                // The pipeline is the one of the settings, not a copy: undo the override, or
-                // OpenPnP would save it.
+                // The pipeline is the one of the settings, not a copy: undo the overrides, or
+                // OpenPnP would save them.
                 Map<Threshold, Integer> originals = new HashMap<>();
+                Map<ImageCapture, Object[]> originalLights = new HashMap<>();
                 try {
+                    if (lightValue != null) {
+                        for (CvStage stage : pipeline.getStages()) {
+                            if (stage instanceof ImageCapture && stage.isEnabled()) {
+                                ImageCapture capture = (ImageCapture) stage;
+                                originalLights.put(capture, new Object[] {
+                                        capture.isDefaultLight(), capture.getLight()});
+                                setCaptureLight(capture, lightValue);
+                            }
+                        }
+                    }
+                    o.addProperty("light", lightOf(pipeline));
                     JsonArray thresholds = new JsonArray();
                     for (CvStage stage : pipeline.getStages()) {
                         if (stage instanceof Threshold && stage.isEnabled()) {
@@ -1670,6 +1908,12 @@ public class AiBridgeServer {
                     for (Map.Entry<Threshold, Integer> e : originals.entrySet()) {
                         e.getKey()
                          .setThreshold(e.getValue());
+                    }
+                    for (Map.Entry<ImageCapture, Object[]> e : originalLights.entrySet()) {
+                        e.getKey()
+                         .setDefaultLight((Boolean) e.getValue()[0]);
+                        e.getKey()
+                         .setLight(e.getValue()[1]);
                     }
                 }
             }
@@ -4621,6 +4865,14 @@ public class AiBridgeServer {
     private static boolean getBoolean(JsonObject body, String name, boolean defaultValue) {
         JsonElement e = body.get(name);
         return e == null || e.isJsonNull() ? defaultValue : e.getAsBoolean();
+    }
+
+    /**
+     * @return the boolean of the body, or null if none is given.
+     */
+    private static Boolean getOptionalBoolean(JsonObject body, String name) {
+        JsonElement e = body.get(name);
+        return e == null || e.isJsonNull() ? null : e.getAsBoolean();
     }
 
     static JsonElement toJson(Location l) {
