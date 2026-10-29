@@ -10,7 +10,7 @@
 2. **Task 時間軸**：過去、現在、未來的 task，像歌詞一樣上下展開，可以看全部，現在的 task 高亮並置中。
 3. **電路板設計圖**：依 job 畫出板子、焊墊和零件，顯示哪些放了、哪些還沒放。
 4. **元件列表**：依零件分組，可收合；點一顆會在板子圖上高亮。
-5. **Claude 對話視窗**：參考 Obsidian 外掛 Claudian 的做法，在背景跑 Claude Code，把串流畫成對話（文字逐字出現、工具呼叫可展開、圖片直接顯示、todo 同步到 Task 時間軸、工具權限用按鈕核准）。
+5. **Claude 對話視窗**：參考 Obsidian 外掛 Claudian 的做法，在背景跑 Claude Code，把串流畫成對話（文字逐字出現、工具呼叫可展開、圖片直接顯示、Claude 的計畫同步到 Task 時間軸、工具權限用按鈕核准）。介面文字先做英文。
 
 OpenPnP 的 Swing 介面不動，機器照樣由 OpenPnP 控制。新介面只透過 AI bridge 讀資料、下指令。
 
@@ -62,7 +62,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose
     `{"type":"control_response","response":{"subtype":"success","request_id":"<同一個>","response":{"behavior":"allow","updatedInput":{...}}}}`
     或 `"behavior":"deny","message":"..."`。實測 deny 之後 Claude 會收到錯誤並停下來說明。
   - `result`：一輪結束（花費、token）
-- `TodoWrite` 工具呼叫的 input 就是 todo 清單，拿來當 Task 時間軸的「現在／未來」。
+- **這個版本的 Claude Code 在 `-p` 模式沒有 `TodoWrite`**（10/29 實測，init 的工具清單裡沒有）。所以在 `ai-bridge/server.py` 加了 `update_plan(steps)`：不動機器，只把 `[{content, status}]` 原樣收下；介面從對話串流裡的 tool_use input 讀出計畫。ui_server 對 `*__update_plan` 一律自動核准，介面也不顯示它的核准卡片。若之後的版本有 `TodoWrite`，介面也照樣讀（`input.todos`）。
 
 ## 已決定的事（使用者 10/29 回「好」，照提議的預設）
 
@@ -92,11 +92,15 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 - [x] 外觀改成 Ubuntu（GNOME／Yaru）風格（10/29，使用者指定）：紫紅桌布上的圓角視窗；左側欄放機器狀態、可收合的元件列表和 job 名稱；頂端搜尋框篩選零件；Ubuntu 橘＝現在／選取／要人決定，綠＝已完成；跟著系統切換淺色和深色
 - [ ] **打包**：OpenPnP 關閉時 `mvn package`，之後用 `start-openpnp.bat` 開的 OpenPnP 才有 view server。10/29 寫完時真機 OpenPnP 正在被另一個工作階段使用，所以還沒打包
 - [ ] 在一般瀏覽器確認 MJPEG 相機串流（無頭 Edge 不畫 MJPEG；`?poll=1` 改抓單張的模式已確認正常）
-- [ ] todo 同步到 Task 時間軸（程式寫了，還沒有實際讓 Claude 用 TodoWrite 測過）
+- [x] 計畫同步到 Task 時間軸（10/29，讓 Claude 呼叫 `update_plan` 實測過）
+- [x] Task 時間軸改成兩層（10/29，使用者要求）：第一層是階段（Setup、Feeders、Vision、Boards、Place、Inspect、Rework、Plan、Machine），第二層是 task。過去的階段來自動作紀錄，同一種動作連續出現就併在一起；`nozzle/discard`、`camera/move` 歸到當時所在的階段。現在的階段是正在跑的機器工具，或計畫裡 in_progress 的那一步（依字詞判斷階段，見 `phaseOfText`）。之後的階段是計畫裡 pending 的步驟，沒有計畫時是 job 裡還沒放的零件。只有現在的階段展開並高亮；點收合的階段可以暫時打開；「Expand all」全部打開。每個 task 只顯示短標籤，hover 出現 Details 按鈕，按了顯示時間、原因、結果和參數
+- [x] 介面文字改成英文（10/29）。對 Claude 的系統提示也改成英文，請它用使用者的語言回覆
 - [ ] 真機測試
 - [ ] 第三階段
 
 ### 已知問題與注意事項
+
+- 模擬機的動作紀錄是零碎的測試，過去的階段會一格一格交錯（Setup、Inspect、Setup…）。真機的紀錄比較連續；如果還是太碎，可以考慮把很短的階段併起來。
 
 - 板子的已放狀態：Job 分頁開著 job 時，跟 GUI 同步。Job 分頁沒開 job 時，`/api/layout` 改用動作紀錄裡最近用過的 job 檔，狀態以檔案為準。`place_from_job` 不會改檔案，所以這時 Claude 放的零件不會變成「已放」。之後可以從 `job/place`、`job/inspect` 的動作紀錄推算。
 - 動作紀錄裡有幾筆舊紀錄本身就是亂碼（寫入時就壞了），介面照實顯示。

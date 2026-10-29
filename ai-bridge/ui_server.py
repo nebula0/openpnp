@@ -95,18 +95,22 @@ class Chat:
 
     def system_prompt(self):
         server = "openpnp-sim" if self.sim else "openpnp"
-        machine = "模擬機" if self.sim else "真機"
+        machine = "the simulator" if self.sim else "the real machine"
         return (
-            f"你在 OpenPnP 的網頁操作介面裡和使用者對話。這個介面連的是{machine}，"
-            f"機器操作只用 MCP server「{server}」的工具。使用者在同一個畫面看得到相機即時畫面、"
-            "電路板圖、元件列表和 Task 時間軸。有兩個以上步驟的工作，先用 TodoWrite 列出步驟，"
-            "做的時候隨時更新狀態，介面會把它畫成 Task 時間軸。回覆用繁體中文，簡短。"
+            f"You are talking with the user in the OpenPnP web UI, which is connected to {machine}. "
+            f"For machine operations use only the tools of the MCP server '{server}'. Next to this "
+            "chat the user sees the live cameras, the board, the parts list and a task timeline. "
+            f"For work with two or more steps, first list the steps with the update_plan tool of "
+            f"'{server}' and call it again whenever a step starts or finishes; the UI shows the plan "
+            "on the task timeline, grouped into phases (setup, feeders, vision, boards, place, "
+            "inspect, rework), so name each step so that its phase is clear. Keep replies short, "
+            "in the language the user writes in."
         )
 
     def start(self):
         exe = shutil.which("claude")
         if not exe:
-            raise RuntimeError("找不到 claude 指令，請先安裝 Claude Code。")
+            raise RuntimeError("The claude command was not found. Install Claude Code first.")
         cmd = [exe, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
                "--verbose", "--include-partial-messages", "--permission-prompt-tool", "stdio",
                "--append-system-prompt", self.system_prompt()]
@@ -158,7 +162,8 @@ class Chat:
                  "tool_name": request.get("tool_name"), "input": request.get("input"),
                  "tool_use_id": request.get("tool_use_id"),
                  "description": request.get("description")}
-        if self.auto_approve:
+        # update_plan only draws the task timeline, so it never needs asking.
+        if self.auto_approve or str(request.get("tool_name", "")).endswith("__update_plan"):
             self.emit(event)
             self.answer(request_id, True, auto=True, input=request.get("input"))
             return
@@ -175,7 +180,7 @@ class Chat:
             response = {"behavior": "allow",
                         "updatedInput": input if input is not None else (request or {}).get("input")}
         else:
-            response = {"behavior": "deny", "message": message or "使用者在介面上拒絕了。"}
+            response = {"behavior": "deny", "message": message or "The user denied this in the UI."}
         self._write({"type": "control_response",
                      "response": {"subtype": "success", "request_id": request_id,
                                   "response": response}})
@@ -323,7 +328,7 @@ def make_handler(bridge, chat, config_dir):
                 elif url.path == "/api/chat/permission":
                     if not chat.answer(body["request_id"], bool(body.get("allow")),
                                        body.get("message")):
-                        return self.send_json({"status": "error", "error": "已經回覆過了"}, 409)
+                        return self.send_json({"status": "error", "error": "Already answered."}, 409)
                 elif url.path == "/api/chat/interrupt":
                     chat.interrupt()
                 elif url.path == "/api/chat/reset":
@@ -357,7 +362,7 @@ def make_handler(bridge, chat, config_dir):
             except urllib.error.HTTPError as e:
                 self.send_json({"status": "error", "error": e.read().decode("utf-8", "replace")}, e.code)
             except (OSError, ConnectionError, ValueError) as e:
-                self.send_json({"status": "error", "error": f"連不到 OpenPnP：{e}"}, 502)
+                self.send_json({"status": "error", "error": f"Cannot reach OpenPnP: {e}"}, 502)
 
         def forward(self, port_key, path, query):
             target = path + ("?" + query if query else "")
@@ -373,7 +378,7 @@ def make_handler(bridge, chat, config_dir):
                 self.wfile.write(body)
                 return
             except (OSError, ConnectionError) as e:
-                return self.send_json({"status": "error", "error": f"連不到 OpenPnP：{e}"}, 502)
+                return self.send_json({"status": "error", "error": f"Cannot reach OpenPnP: {e}"}, 502)
             with resp:
                 self.send_response(resp.status)
                 self.send_header("Content-Type", resp.headers.get("Content-Type", ""))
@@ -428,7 +433,7 @@ def main():
     chat = Chat(args.sim)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(bridge, chat, config_dir))
     server.daemon_threads = True
-    print(f"OpenPnP UI ({'模擬機' if args.sim else '真機'}, {config_dir}): "
+    print(f"OpenPnP UI ({'simulator' if args.sim else 'real machine'}, {config_dir}): "
           f"http://127.0.0.1:{args.port}", flush=True)
     try:
         server.serve_forever()

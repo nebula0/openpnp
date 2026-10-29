@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LumenPnP 副駕</title>
+<title>LumenPnP Copilot</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&family=Ubuntu+Mono&display=swap">
 <style>
 /* Layout: an Ubuntu (GNOME/Yaru) window on the aubergine desktop. Sidebar: app name, machine
@@ -191,30 +191,69 @@ main {
 .legend { display: flex; gap: 10px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; background: var(--c); }
 
-/* timeline */
 #taskPanel { flex: 1 1 auto; }
+/* timeline: phases holding tasks; only the current phase is open */
 #lyrics {
-  position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 40% 16px; margin: 0; list-style: none; scroll-behavior: smooth;
-  -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
-          mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent);
+  position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 38% 12px; margin: 0; list-style: none;
+  -webkit-mask-image: linear-gradient(transparent, #000 16%, #000 84%, transparent);
+          mask-image: linear-gradient(transparent, #000 16%, #000 84%, transparent);
 }
-#lyrics.all { padding: 6px 16px 12px; -webkit-mask-image: none; mask-image: none; }
-#lyrics li { padding: 5px 0 5px 24px; position: relative; transition: opacity .3s, font-size .3s, color .3s; color: var(--muted); font-size: 14px; line-height: 1.35; }
-#lyrics li::before { content: ""; position: absolute; left: 4px; top: .7em; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--faint); box-sizing: border-box; }
-#lyrics li.done::before { background: var(--done); border-color: var(--done); }
-#lyrics li.fail::before { background: var(--fail); border-color: var(--fail); }
-#lyrics li.future::before { border-style: dotted; }
-#lyrics li.current { color: var(--fg); font-size: 20px; font-weight: 700; padding-block: 12px; }
-#lyrics li.current::before { width: 13px; height: 13px; left: 2px; top: 1.05em; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
-#lyrics li.idle { color: var(--faint); font-size: 15px; font-weight: 400; font-style: italic; }
-#lyrics li.idle::before { background: none; border-color: var(--faint); box-shadow: none; }
-#lyrics li .meta { display: block; font-size: 12px; color: var(--faint); font-weight: 400; font-family: var(--font-num); }
-#lyrics li.fail .meta { color: var(--fail); }
-#lyrics li.current .meta { color: var(--accent); font-size: 13px; }
-#lyrics:not(.all) li[data-d="1"] { opacity: .85; }
-#lyrics:not(.all) li[data-d="2"] { opacity: .65; }
-#lyrics:not(.all) li[data-d="3"] { opacity: .45; }
-#lyrics:not(.all) li[data-d="far"] { opacity: .3; }
+#lyrics.all { padding: 6px 12px 12px; -webkit-mask-image: none; mask-image: none; }
+#lyrics .phase { position: relative; padding-left: 22px; transition: opacity .3s; }
+#lyrics .phase::before {
+  content: ""; position: absolute; left: 5px; top: 14px; width: 10px; height: 10px; border-radius: 50%;
+  border: 2px solid var(--faint); box-sizing: border-box; background: var(--card);
+}
+#lyrics .phase::after { content: ""; position: absolute; left: 9px; top: 26px; bottom: -4px; width: 2px; background: var(--line); }
+#lyrics .phase:last-child::after { display: none; }
+#lyrics .phase.past::before { background: var(--done); border-color: var(--done); }
+#lyrics .phase.next::before { border-style: dotted; }
+#lyrics .ph-head {
+  display: flex; align-items: baseline; gap: 8px; width: 100%; text-align: left; border: 0; background: none;
+  padding: 8px 8px; border-radius: 8px; cursor: pointer; color: var(--muted); font-size: 14px;
+}
+#lyrics .ph-head:hover { background: var(--hover); }
+#lyrics .ph-name { font-weight: 500; color: var(--fg); }
+#lyrics .ph-sum { font-size: 12px; color: var(--faint); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#lyrics .ph-head.has-fail .ph-sum { color: var(--fail); }
+#lyrics .ph-time { font-size: 12px; color: var(--faint); }
+#lyrics .phase.current::before { width: 14px; height: 14px; left: 3px; top: 13px; background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 5px var(--accent-soft); }
+#lyrics .phase.current > .ph-head { cursor: default; background: var(--accent-soft); padding-block: 10px; }
+#lyrics .phase.current > .ph-head:hover { background: var(--accent-soft); }
+#lyrics .phase.current .ph-name { font-size: 20px; font-weight: 700; color: var(--accent); }
+#lyrics .phase.idle .ph-head { cursor: default; font-style: italic; color: var(--faint); }
+#lyrics .phase.idle::before { background: none; border-color: var(--faint); }
+#lyrics:not(.all) .phase[data-d="1"] { opacity: .85; }
+#lyrics:not(.all) .phase[data-d="2"] { opacity: .65; }
+#lyrics:not(.all) .phase[data-d="3"] { opacity: .5; }
+#lyrics:not(.all) .phase[data-d="far"] { opacity: .35; }
+#lyrics .tasks { list-style: none; margin: 2px 0 8px; padding: 0 0 0 4px; }
+#lyrics .task { border-radius: 6px; }
+#lyrics .task-row { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; min-height: 28px; }
+#lyrics .task-row:hover, #lyrics .task.open .task-row { background: var(--hover); }
+#lyrics .task-row::before { content: ""; flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--faint); box-sizing: border-box; }
+#lyrics .task.done .task-row::before { background: var(--done); border-color: var(--done); }
+#lyrics .task.fail .task-row::before { background: var(--fail); border-color: var(--fail); }
+#lyrics .task.next .task-row::before { border-style: dotted; }
+#lyrics .task.now .task-row::before { width: 9px; height: 9px; background: var(--accent); border-color: var(--accent); animation: blink 1.2s infinite; }
+#lyrics .task-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--muted); }
+#lyrics .task.now .task-text { color: var(--fg); font-weight: 700; font-size: 15px; }
+#lyrics .task.fail .task-text { color: var(--fail); }
+#lyrics .task-time { font-size: 11px; color: var(--faint); }
+#lyrics .det {
+  border: 0; background: var(--active); color: var(--fg); border-radius: 6px; padding: 0 8px; font-size: 12px;
+  line-height: 20px; cursor: pointer; visibility: hidden;
+}
+#lyrics .task-row:hover .det, #lyrics .det:focus-visible, #lyrics .task.open .det { visibility: visible; }
+@media (hover: none) { #lyrics .det { visibility: visible; } }
+#lyrics .task-detail {
+  margin: 2px 8px 6px 23px; padding: 6px 10px; background: var(--card-2); border-radius: 6px;
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px;
+}
+#lyrics .task-detail dt { color: var(--faint); }
+#lyrics .task-detail dd { margin: 0; color: var(--fg); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+#lyrics .task-detail dd.mono { font-size: 11.5px; max-height: 160px; overflow-y: auto; }
+#lyrics .more { font-size: 12px; color: var(--faint); padding: 2px 8px 2px 23px; }
 
 /* parts, in the sidebar */
 #partsPanel { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 0 10px; border-top: 1px solid var(--line); padding-top: 6px; }
@@ -332,18 +371,18 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
 <body>
 <div id="app">
   <aside id="side">
-    <div class="side-title">LumenPnP 副駕</div>
-    <div class="side-list" aria-label="機器狀態">
-      <span class="chip" id="cMachine">連線中…</span>
-      <span class="chip" id="cEnabled"><i></i>啟用</span>
-      <span class="chip" id="cHomed"><i></i>歸零</span>
-      <span class="chip" id="cBusy"><i></i>待命</span>
+    <div class="side-title">LumenPnP Copilot</div>
+    <div class="side-list" aria-label="Machine status">
+      <span class="chip" id="cMachine">Connecting…</span>
+      <span class="chip" id="cEnabled"><i></i>Enabled</span>
+      <span class="chip" id="cHomed"><i></i>Homed</span>
+      <span class="chip" id="cBusy"><i></i>Idle</span>
       <span id="cNozzles" style="display:contents"></span>
     </div>
     <div id="partsPanel">
       <div id="partsHead" role="button" tabindex="0" aria-expanded="false">
         <span class="caret">▸</span>
-        <h2>元件</h2>
+        <h2>Parts</h2>
         <span class="sub" id="partsSub"></span>
       </div>
       <div id="partsBody">
@@ -357,27 +396,27 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     <div class="headerbar">
       <label class="search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5L21 21"/></svg>
-        <input id="partsFilter" type="search" placeholder="搜尋零件或位號">
+        <input id="partsFilter" type="search" placeholder="Search parts or references">
       </label>
     </div>
     <main>
       <section class="col">
         <div class="panel" id="cameraPanel">
           <div class="ph">
-            <h2>相機</h2>
-            <div class="tabs" id="camTabs" role="group" aria-label="相機"></div>
+            <h2>Camera</h2>
+            <div class="tabs" id="camTabs" role="group" aria-label="Camera"></div>
             <span class="grow"></span>
-            <button class="btn" id="camPause" type="button">暫停</button>
+            <button class="btn" id="camPause" type="button">Pause</button>
           </div>
           <div class="cams" id="cams"></div>
         </div>
         <div class="panel" id="boardPanel">
           <div class="ph">
-            <h2>電路板</h2>
-            <div class="tabs" id="boardTabs" role="group" aria-label="板子"></div>
+            <h2>Board</h2>
+            <div class="tabs" id="boardTabs" role="group" aria-label="Board"></div>
             <span class="grow"></span>
-            <div class="legend"><span style="--c:#57e389">已放</span><span style="--c:var(--pad-todo)">未放</span><span style="--c:var(--accent)">選取</span></div>
-            <button class="btn" id="boardFit" type="button" title="重設縮放">⤢</button>
+            <div class="legend"><span style="--c:#57e389">Placed</span><span style="--c:var(--pad-todo)">To place</span><span style="--c:var(--accent)">Selected</span></div>
+            <button class="btn" id="boardFit" type="button" title="Reset zoom">⤢</button>
           </div>
           <div id="boardWrap">
             <svg id="board" xmlns="http://www.w3.org/2000/svg"></svg>
@@ -389,10 +428,10 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       <section class="col">
         <div class="panel" id="taskPanel">
           <div class="ph">
-            <h2>Task</h2>
+            <h2>Tasks</h2>
             <span class="sub" id="taskSub"></span>
             <span class="grow"></span>
-            <button class="btn" id="lyricsMode" type="button">展開全部</button>
+            <button class="btn" id="lyricsMode" type="button">Expand all</button>
           </div>
           <ol id="lyrics"></ol>
         </div>
@@ -404,18 +443,18 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
             <h2>Claude</h2>
             <span class="sub" id="chatSub"></span>
             <span class="grow"></span>
-            <label class="switch" id="autoWrap" title="開啟後，需要權限的工具不再詢問，直接執行"><input type="checkbox" id="autoApprove">自動核准</label>
-            <button class="btn" id="newChat" type="button">新對話</button>
+            <label class="switch" id="autoWrap" title="When on, tools that need permission run without asking"><input type="checkbox" id="autoApprove">Auto-approve</label>
+            <button class="btn" id="newChat" type="button">New chat</button>
           </div>
-          <div id="chatLog"><div class="empty" id="chatEmpty">跟 Claude 說要做什麼。需要權限的工具會在這裡請你核准。</div></div>
+          <div id="chatLog"><div class="empty" id="chatEmpty">Tell Claude what to do. Tools that need permission will ask you here.</div></div>
           <div id="composer">
             <div id="attach"></div>
-            <textarea id="input" placeholder="例如：掃 QR 認 feeder，然後放 Brd2 的 0603（Enter 送出，Shift+Enter 換行）"></textarea>
+            <textarea id="input" placeholder="For example: scan the QR feeders, then place the 0603s on Brd2 (Enter to send, Shift+Enter for a new line)"></textarea>
             <div class="row">
-              <button class="btn" id="attachCam" type="button">附上相機畫面</button>
+              <button class="btn" id="attachCam" type="button">Attach camera image</button>
               <span class="grow"></span>
-              <button class="btn danger" id="stop" type="button" hidden>停止</button>
-              <button class="btn primary" id="send" type="button">送出</button>
+              <button class="btn danger" id="stop" type="button" hidden>Stop</button>
+              <button class="btn primary" id="send" type="button">Send</button>
             </div>
           </div>
         </div>
@@ -477,21 +516,21 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     getJSON('/api/view/status').then(function (s) {
       state.status = s;
       $('cMachine').className = 'chip ' + (state.sim ? 'sim' : 'real');
-      $('cMachine').textContent = state.sim ? '模擬機' : '真機';
-      chip('cEnabled', s.enabled, s.enabled ? '已啟用' : '未啟用', s.enabled ? '' : 'bad');
-      chip('cHomed', s.homed, s.homed ? '已歸零' : '未歸零', s.homed ? '' : 'bad');
-      chip('cBusy', false, s.jobActive ? 'Job 執行中' : s.busy ? '機器動作中' : '待命', s.busy || s.jobActive ? 'busy' : '');
+      $('cMachine').textContent = state.sim ? 'Simulator' : 'Real machine';
+      chip('cEnabled', s.enabled, s.enabled ? 'Enabled' : 'Not enabled', s.enabled ? '' : 'bad');
+      chip('cHomed', s.homed, s.homed ? 'Homed' : 'Not homed', s.homed ? '' : 'bad');
+      chip('cBusy', false, s.jobActive ? 'Job running' : s.busy ? 'Moving' : 'Idle', s.busy || s.jobActive ? 'busy' : '');
       var nz = $('cNozzles'); nz.innerHTML = '';
       (s.nozzles || []).forEach(function (n) {
         var c = el('span', 'chip' + (n.partOnNozzle ? ' part' : ''));
-        c.textContent = n.name + '：' + (n.partOnNozzle || '空') + (n.atSafeZ === false ? '（不在安全高度）' : '');
+        c.textContent = n.name + ': ' + (n.partOnNozzle || 'empty') + (n.atSafeZ === false ? ' (below safe Z)' : '');
         c.title = (n.nozzleTip || '') + ' Z ' + n.z;
         nz.appendChild(c);
       });
       renderTimeline();
     }).catch(function (e) {
       $('cMachine').className = 'chip bad';
-      $('cMachine').textContent = '連不到 OpenPnP';
+      $('cMachine').textContent = 'OpenPnP not reachable';
       $('cMachine').title = e.message;
     });
   }
@@ -516,11 +555,11 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     box.className = 'cams' + (list.length > 1 ? ' both' : '');
     list.forEach(function (c) {
       var d = el('div', 'cam');
-      var img = el('img'); img.alt = c.name + ' 相機';
-      var msg = el('div', 'msg', '等待畫面…');
+      var img = el('img'); img.alt = c.name + ' camera';
+      var msg = el('div', 'msg', 'Waiting for the image…');
       var shown = false;
       img.onload = function () { shown = true; msg.hidden = true; };
-      img.onerror = function () { if (!shown) { msg.hidden = false; msg.textContent = '拿不到 ' + c.name + ' 的畫面。OpenPnP 要用新版重新打包才有即時畫面。'; } };
+      img.onerror = function () { if (!shown) { msg.hidden = false; msg.textContent = 'No image from ' + c.name + '. The live view needs OpenPnP built from this branch.'; } };
       if (!camPaused && POLL_FRAMES) {
         pollFrames(img, c.name, gen);
       }
@@ -530,7 +569,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
           if (!shown && gen === camGeneration) { img.removeAttribute('src'); pollFrames(img, c.name, gen); }
         }, 4000);
       }
-      else msg.textContent = '已暫停';
+      else msg.textContent = 'Paused';
       d.appendChild(img); d.appendChild(el('div', 'cross')); d.appendChild(el('span', 'label', c.name)); d.appendChild(msg);
       box.appendChild(d);
     });
@@ -538,7 +577,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
   function renderCamTabs() {
     var t = $('camTabs'); t.innerHTML = '';
     var opts = cams.map(function (c) { return [c.name, c.name]; });
-    if (cams.length > 1) opts.push(['__both', '兩台']);
+    if (cams.length > 1) opts.push(['__both', 'Both']);
     opts.forEach(function (o) {
       var b = el('button', null, o[1]); b.type = 'button';
       b.setAttribute('aria-pressed', String(camMode === o[0]));
@@ -552,13 +591,13 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       if (!camMode) camMode = (cams.find(function (c) { return c.looking === 'Down'; }) || cams[0] || {}).name;
       renderCamTabs(); renderCams();
     }).catch(function () {
-      $('cams').innerHTML = '<div class="cam"><div class="msg">連不到 OpenPnP 的 view server。請用新版 OpenPnP（重新打包後）開啟，並加上 -DaiBridge.port。</div></div>';
+      $('cams').innerHTML = '<div class="cam"><div class="msg">Can\'t reach the OpenPnP view server. Start OpenPnP built from this branch, with -DaiBridge.port.</div></div>';
       setTimeout(loadCameras, 5000);
     });
   }
   $('camPause').onclick = function () {
     camPaused = !camPaused;
-    this.textContent = camPaused ? '繼續' : '暫停';
+    this.textContent = camPaused ? 'Resume' : 'Pause';
     renderCams();
   };
   document.addEventListener('visibilitychange', function () {
@@ -577,10 +616,10 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       layoutKey = key;
       var first = !state.layout || (state.layout.file !== j.file);
       state.layout = j;
-      var name = j.file ? j.file.split(/[\\/]/).pop() : j.boards.length ? '（未存檔的 job）' : '（沒有開 job）';
-      $('jobName').textContent = name + (j.source === 'lastAction' ? '・最近用過' : '');
+      var name = j.file ? j.file.split(/[\\/]/).pop() : j.boards.length ? '(unsaved job)' : '(no job open)';
+      $('jobName').textContent = name + (j.source === 'lastAction' ? ' · last used' : '');
       $('jobName').title = (j.file || '') + (j.source === 'lastAction'
-        ? '\nOpenPnP 的 Job 分頁沒有開 job，這是動作紀錄裡最近用過的 job 檔。已放狀態以檔案為準。' : '');
+        ? '\nNo job is open in the OpenPnP Job tab; this is the job file the bridge used last. Placed status comes from the file.' : '');
       if (!state.board || !j.boards.some(function (b) { return b.boardId === state.board; })) {
         state.board = j.boards.length ? (j.boards.find(function (b) { return b.enabled; }) || j.boards[0]).boardId : null;
         first = true;
@@ -596,7 +635,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     var t = $('boardTabs'); t.innerHTML = '';
     (state.layout ? state.layout.boards : []).forEach(function (b) {
       var btn = el('button', null, shortId(b.boardId)); btn.type = 'button';
-      btn.title = b.name + (b.enabled ? '' : '（停用）');
+      btn.title = b.name + (b.enabled ? '' : ' (disabled)');
       btn.setAttribute('aria-pressed', String(b.boardId === state.board));
       btn.onclick = function () { state.board = b.boardId; renderBoardTabs(); renderBoard(true); };
       t.appendChild(btn);
@@ -692,7 +731,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       if (!g || !g._p) { tip.style.display = 'none'; return; }
       var p = g._p, r = $('boardWrap').getBoundingClientRect();
       tip.innerHTML = '<b>' + esc(p.placementId) + '</b> ' + esc(p.partId || '') + '<br><span style="color:var(--muted)">' +
-        esc(p.packageId || '') + ' · ' + (p.placed ? '已放' : p.enabled ? '未放' : '停用') + ' · R' + p.rotation + '°</span>';
+        esc(p.packageId || '') + ' · ' + (p.placed ? 'placed' : p.enabled ? 'to place' : 'disabled') + ' · R' + p.rotation + '°</span>';
       tip.style.display = 'block';
       tip.style.left = Math.min(e.clientX - r.left + 12, r.width - tip.offsetWidth - 4) + 'px';
       tip.style.top = (e.clientY - r.top + 12) + 'px';
@@ -739,13 +778,13 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     state.layout.boards.forEach(function (b) {
       b.placements.forEach(function (p) {
         if (p.type !== 'Placement' || !p.enabled) return;
-        var k = p.partId || '（沒有零件）';
+        var k = p.partId || '(no part)';
         if (!groups[k]) { groups[k] = { pkg: p.packageId, list: [] }; kinds++; }
         groups[k].list.push({ b: b, p: p });
         total++; if (p.placed) placed++;
       });
     });
-    $('partsSub').textContent = kinds + ' 種 · ' + placed + '/' + total + ' 顆已放';
+    $('partsSub').textContent = kinds + ' parts · ' + placed + '/' + total + ' placed';
     var f = $('partsFilter').value.trim().toLowerCase();
     Object.keys(groups).sort().forEach(function (k) {
       var g = groups[k];
@@ -766,7 +805,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
         var li = el('li'), btn = el('button', (x.p.placed ? 'placed' : '') + (state.selPlacement === key ? ' sel' : ''));
         btn.type = 'button';
         btn.textContent = (state.layout.boards.length > 1 ? shortId(x.b.boardId) + ':' : '') + x.p.placementId;
-        btn.title = x.p.placed ? '已放' : '未放';
+        btn.title = x.p.placed ? 'Placed' : 'To place';
         btn.onclick = function () {
           if (state.board !== x.b.boardId) { state.board = x.b.boardId; renderBoardTabs(); renderBoard(true); }
           selectPlacement(key, k, false);
@@ -780,20 +819,76 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
   }
   function askAbout(b, p) {
     var t = $('input');
-    t.value = (t.value ? t.value + '\n' : '') + p.placementId + '（' + (p.partId || '') + '，' + b.boardId + '）：';
+    t.value = (t.value ? t.value + '\n' : '') + p.placementId + ' (' + (p.partId || '') + ', ' + b.boardId + '): ';
     t.focus();
   }
 
   // ------------------------------------------------------------------ actions + timeline
-  var ACTION_NAMES = {
-    'job/place': '放料', 'job/inspect': '驗收', 'job/rework': '重工', 'job/survey': '找 fiducial',
-    'vision/bottom/test': '底部視覺測試', 'nozzle/discard': '丟料', 'nozzle/calibrate': '校正吸嘴',
-    'feeder/pick': '試吸', 'feeder/inspect': '檢查 feeder', 'feeder/probe-z': '量 Z', 'feeder/update': '改 feeder',
-    'feeder/strip/setup': '設定料帶', 'feeder/scan-qr': '掃 QR', 'machine/home': '歸零', 'camera/move': '移動相機',
-    'bedmap/scan': '掃描機台', 'bedmap/scan/finished': '機台掃描完成', 'part/update': '改零件', 'package/update': '改封裝'
+  // Two levels: phases (Setup, Feeders, Vision, ...) holding tasks. Past phases come from the
+  // action log, grouped while the phase stays the same; the current phase is the running tool or
+  // Claude's step in progress; later phases are Claude's pending steps, else the job's unplaced
+  // parts. Only the current phase is open.
+  var PHASES = {
+    setup: 'Setup', feeders: 'Feeders', vision: 'Vision', boards: 'Boards', place: 'Place',
+    inspect: 'Inspect', rework: 'Rework', plan: 'Plan', machine: 'Machine'
   };
+  var ACTION_PHASE = {
+    'machine/home': 'setup', 'nozzle/calibrate': 'setup', 'bedmap/scan': 'setup', 'bedmap/scan/finished': 'setup',
+    'feeder/pick': 'feeders', 'feeder/inspect': 'feeders', 'feeder/probe-z': 'feeders', 'feeder/update': 'feeders',
+    'feeder/strip/setup': 'feeders', 'feeder/scan-qr': 'feeders',
+    'vision/bottom/test': 'vision', 'package/update': 'vision', 'part/update': 'vision',
+    'job/survey': 'boards', 'job/place': 'place', 'job/inspect': 'inspect', 'job/rework': 'rework'
+  };
+  // Actions that belong to whatever phase they happen in.
+  var STICKY = { 'nozzle/discard': 1, 'camera/move': 1 };
+  var TOOL_ACTION = {
+    home_machine: 'machine/home', calibrate_nozzle_tip: 'nozzle/calibrate', scan_bed_map: 'bedmap/scan',
+    pick_from_feeder: 'feeder/pick', inspect_feeder: 'feeder/inspect', probe_feeder_z: 'feeder/probe-z',
+    update_feeder: 'feeder/update', setup_strip_feeder: 'feeder/strip/setup', scan_qr_feeders: 'feeder/scan-qr',
+    test_bottom_vision: 'vision/bottom/test', update_package: 'package/update', update_part: 'part/update',
+    survey_bare_boards: 'job/survey', place_from_job: 'job/place', inspect_placements: 'job/inspect',
+    rework_placement: 'job/rework', discard_part: 'nozzle/discard', move_camera: 'camera/move'
+  };
+  var ACTION_LABEL = {
+    'machine/home': 'Home', 'nozzle/calibrate': 'Calibrate nozzle tip', 'bedmap/scan': 'Scan bed',
+    'bedmap/scan/finished': 'Bed scan done', 'feeder/pick': 'Test pick', 'feeder/inspect': 'Check feeder',
+    'feeder/probe-z': 'Probe Z', 'feeder/update': 'Update feeder', 'feeder/strip/setup': 'Set up strip feeder',
+    'feeder/scan-qr': 'Scan QR labels', 'vision/bottom/test': 'Vision test', 'package/update': 'Update package',
+    'part/update': 'Update part', 'job/survey': 'Find fiducials', 'job/place': 'Place', 'job/inspect': 'Inspect',
+    'job/rework': 'Rework', 'nozzle/discard': 'Discard part', 'camera/move': 'Move camera'
+  };
+  var FROM_PLAN = "Claude's plan";
+  function phaseOfText(t) {
+    t = (t || '').toLowerCase();
+    if (/rework|重工|轉正/.test(t)) return 'rework';
+    if (/inspect|驗收|檢查放/.test(t)) return 'inspect';
+    if (/fiducial|survey|空板/.test(t)) return 'boards';
+    if (/vision|threshold|視覺|門檻/.test(t)) return 'vision';
+    if (/feeder|qr|strip|料帶|probe|量 ?z|試吸/.test(t)) return 'feeders';
+    if (/home|calibrat|歸零|校正|bed ?map|掃描機台/.test(t)) return 'setup';
+    if (/place|放/.test(t)) return 'place';
+    return 'plan';
+  }
+  function ids(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    var names = list.map(function (p) { return p.placementId || p.id || ''; }).filter(Boolean);
+    return names.slice(0, 3).join(', ') + (names.length > 3 ? ' +' + (names.length - 3) : '');
+  }
+  function shortName(s) { s = String(s || ''); return s.length > 16 ? s.slice(0, 15) + '…' : s; }
+  function actionLabel(action, req) {
+    req = req || {};
+    var base = ACTION_LABEL[action] || action;
+    var arg = '';
+    if (action === 'job/place' || action === 'job/inspect') arg = ids(req.placements);
+    else if (action === 'job/rework') arg = req.placementId || ids(req.placements);
+    else if (action === 'vision/bottom/test') arg = [].concat(req.thresholds || req.threshold || []).join('/');
+    else if (action === 'part/update') arg = shortName(req.partId);
+    else if (action === 'package/update') arg = shortName(req.packageId);
+    else if (/^feeder\//.test(action) && action !== 'feeder/scan-qr') arg = shortName(req.feederName || req.feederId);
+    return arg ? base + ' · ' + arg : base;
+  }
   function pollActions() {
-    getJSON('/api/actions?limit=80').then(function (j) {
+    getJSON('/api/actions?limit=120').then(function (j) {
       var key = JSON.stringify(j.actions.length ? j.actions[j.actions.length - 1] : null) + j.actions.length;
       if (key === state.actionsKey) return;
       state.actionsKey = key;
@@ -802,67 +897,190 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     }).catch(function () {});
   }
   var lyricsAll = false, userScrolledAt = 0, nowPlacement = null;
+  var opened = {};      // phase key -> true when opened by hand
+  var detailsOpen = {}; // task key -> true when its details are shown
   $('lyricsMode').onclick = function () {
     lyricsAll = !lyricsAll;
-    this.textContent = lyricsAll ? '收合' : '展開全部';
-    $('lyrics').classList.toggle('all', lyricsAll);
+    this.textContent = lyricsAll ? 'Collapse' : 'Expand all';
     renderTimeline(true);
   };
   $('lyrics').addEventListener('wheel', function () { userScrolledAt = Date.now(); }, { passive: true });
-  function timelineItems() {
-    var past = state.actions.map(function (a) {
-      var name = ACTION_NAMES[a.action] || a.action;
-      var ok = a.status === 'ok';
-      return { cls: ok ? 'done' : 'fail', text: a.reason || name, meta: hhmm(a.time) + ' · ' + name + (ok ? '' : ' · ' + (a.error || a.status || '失敗')) };
-    });
-    var current = [], future = [];
-    nowPlacement = null;
-    if (state.todos && state.todos.length) {
-      state.todos.forEach(function (t) {
-        if (t.status === 'completed') past.push({ cls: 'done', text: t.content, meta: 'Claude 的步驟' });
-        else if (t.status === 'in_progress') current.push({ cls: 'current', text: t.activeForm || t.content, meta: '進行中' });
-        else future.push({ cls: 'future', text: t.content, meta: '' });
-      });
+
+  function buildPhases() {
+    var blocks = [];
+    function push(phase, item, where) {
+      var last = blocks[blocks.length - 1];
+      if (!last || last.phase !== phase || last.where !== where) {
+        last = { phase: phase, where: where, items: [], key: where + ':' + phase + ':' + blocks.length };
+        blocks.push(last);
+      }
+      last.items.push(item);
+      return last;
     }
+    state.actions.forEach(function (a, i) {
+      var phase = ACTION_PHASE[a.action];
+      if (!phase && STICKY[a.action]) phase = blocks.length ? blocks[blocks.length - 1].phase : 'machine';
+      var ok = a.status === 'ok';
+      push(phase || 'machine', {
+        key: 'a' + i + a.time, state: ok ? 'done' : 'fail', text: actionLabel(a.action, a.request), time: a.time,
+        detail: { Time: a.time ? new Date(a.time).toLocaleString() : '', Action: a.action, Reason: a.reason,
+                  Result: ok ? 'ok' : (a.status || 'failed') + (a.error ? ' · ' + a.error : ''),
+                  Request: a.request && Object.keys(a.request).length ? JSON.stringify(a.request, null, 1) : '' }
+      }, 'past');
+    });
+    // Now: running machine tools and Claude's step in progress.
+    var now = [];
+    nowPlacement = null;
     Object.keys(state.running).forEach(function (id) {
-      var r = state.running[id];
-      if (r.name === 'TodoWrite') return;
-      current.push({ cls: 'current', text: r.summary || r.name, meta: '執行中 · ' + r.name });
+      var r = state.running[id], action = TOOL_ACTION[r.name];
+      if (!action) return;
+      var phase = ACTION_PHASE[action] || (blocks.length ? blocks[blocks.length - 1].phase : 'machine');
+      now.push({ phase: phase, item: { key: 'r' + id, state: 'now', text: actionLabel(action, r.input),
+        detail: { Tool: r.name, Reason: (r.input || {}).reason, Input: JSON.stringify(r.input || {}, null, 1) } } });
+      if (action === 'job/place' && r.input && r.input.placements && r.input.placements[0]) {
+        var p = r.input.placements[0];
+        nowPlacement = (p.boardId || '') + ' ' + p.placementId;
+      }
+    });
+    var todos = state.todos || [];
+    todos.forEach(function (t, i) {
+      if (t.status !== 'in_progress') return;
+      now.push({ phase: phaseOfText(t.content), item: { key: 't' + i + t.content, state: 'now',
+        text: t.activeForm || t.content, detail: { Step: t.content, From: FROM_PLAN } } });
     });
     var s = state.status;
-    if (!current.length && s && (s.busy || s.jobActive)) current.push({ cls: 'current', text: s.jobActive ? 'Job 執行中' : '機器動作中', meta: 'OpenPnP' });
-    if (!future.length && state.layout) {
+    if (!now.length && s && (s.busy || s.jobActive)) {
+      now.push({ phase: s.jobActive ? 'place' : 'machine', item: { key: 'busy', state: 'now',
+        text: s.jobActive ? 'Job running' : 'Machine busy', detail: { From: 'OpenPnP' } } });
+    }
+    var current = null;
+    now.forEach(function (n) {
+      var last = blocks[blocks.length - 1];
+      // Continue the last past phase when the work is the same kind.
+      if (!current && last && last.phase === n.phase) { last.where = 'now'; current = last; }
+      if (!current) { current = push(n.phase, n.item, 'now'); return; }
+      current.items.push(n.item);
+    });
+    // Ahead: Claude's pending steps, else what the job still has to place.
+    var pending = todos.filter(function (t) { return t.status === 'pending'; });
+    if (pending.length) {
+      pending.forEach(function (t, i) {
+        var ph = phaseOfText(t.content);
+        var item = { key: 'p' + i + t.content, state: 'next', text: t.content, detail: { Step: t.content, From: FROM_PLAN } };
+        if (current && current === blocks[blocks.length - 1] && current.phase === ph) current.items.push(item);
+        else push(ph, item, 'next');
+      });
+    } else if (state.layout) {
+      var left = [];
       state.layout.boards.forEach(function (b) {
         if (!b.enabled) return;
         b.placements.forEach(function (p) {
           if (p.type !== 'Placement' || !p.enabled || p.placed || p.side !== b.sideUp) return;
-          future.push({ cls: 'future', text: '放 ' + p.placementId + '（' + (p.partId || '?') + '）', meta: shortId(b.boardId) + ' · job 裡還沒放' });
+          left.push({ key: 'j' + b.boardId + p.placementId, state: 'next', text: p.placementId + ' · ' + shortId(b.boardId),
+            detail: { Part: p.partId || '?', Package: p.packageId || '', Board: b.boardId, From: 'Not placed in the job yet' } });
         });
       });
+      if (left.length) {
+        if (current && current.phase === 'place') current.items = current.items.concat(left);
+        else blocks.push({ phase: 'place', where: 'next', items: left, key: 'next:place:job', jobLeft: true });
+      }
     }
-    if (!current.length) current.push({ cls: 'current idle', text: '待命中', meta: '' });
-    return { list: past.concat(current, future), currentIndex: past.length, nPast: past.length, nFuture: future.length };
+    var idx = current ? blocks.indexOf(current) : -1;
+    if (idx < 0) {
+      // Idle: a marker after the past phases.
+      idx = blocks.filter(function (b) { return b.where === 'past'; }).length;
+      blocks.splice(idx, 0, { phase: 'idle', where: 'now', items: [], key: 'idle' });
+    }
+    return { blocks: blocks, current: idx };
   }
+
+  function phaseSummary(b) {
+    var done = 0, fail = 0, now = 0, next = 0;
+    b.items.forEach(function (it) {
+      if (it.state === 'done') done++; else if (it.state === 'fail') fail++; else if (it.state === 'now') now++; else next++;
+    });
+    var parts = [];
+    if (done) parts.push(done + ' done');
+    if (fail) parts.push(fail + ' failed');
+    if (now) parts.push(now + ' running');
+    if (next) parts.push(next + (b.jobLeft ? ' to place' : ' to do'));
+    var times = b.items.map(function (it) { return it.time; }).filter(Boolean);
+    var first = times.length ? hhmm(times[0]) : '', last = times.length ? hhmm(times[times.length - 1]) : '';
+    return { text: parts.join(' · '), range: first + (last && last !== first ? '–' + last : ''), fail: fail > 0 };
+  }
+
   var timelineKey = '';
   function renderTimeline(force) {
-    var t = timelineItems();
-    var key = JSON.stringify(t.list);
+    var t = buildPhases();
+    var key = JSON.stringify(t) + JSON.stringify(opened) + JSON.stringify(detailsOpen) + lyricsAll;
     if (key === timelineKey && !force) return;
     timelineKey = key;
-    $('taskSub').textContent = '過去 ' + t.nPast + ' · 之後 ' + t.nFuture;
+    var past = t.blocks.filter(function (b) { return b.where === 'past'; }).length;
+    var next = t.blocks.filter(function (b) { return b.where === 'next'; }).length;
+    $('taskSub').textContent = past + ' earlier · ' + next + ' ahead';
     var ol = $('lyrics'); ol.innerHTML = '';
+    ol.classList.toggle('all', lyricsAll);
     var cur = null;
-    t.list.forEach(function (it, i) {
-      var li = el('li', it.cls.indexOf('current') === 0 ? it.cls : (i < t.currentIndex ? 'past ' : '') + it.cls);
-      var d = Math.abs(i - t.currentIndex);
+    t.blocks.forEach(function (b, i) {
+      var isCur = i === t.current;
+      var d = Math.abs(i - t.current);
+      var li = el('li', 'phase ' + b.where + (isCur ? ' current' : ''));
       li.dataset.d = d === 0 ? '0' : d <= 3 ? String(d) : 'far';
-      li.appendChild(document.createTextNode(it.text));
-      if (it.meta) li.appendChild(el('span', 'meta', it.meta));
-      if (it.cls.indexOf('current') === 0 && !cur) cur = li;
+      if (b.phase === 'idle') {
+        li.classList.add('idle');
+        li.appendChild(el('div', 'ph-head', 'Idle'));
+        ol.appendChild(li); cur = li;
+        return;
+      }
+      var open = isCur || lyricsAll || opened[b.key];
+      var sum = phaseSummary(b);
+      var head = el('button', 'ph-head' + (sum.fail ? ' has-fail' : ''));
+      head.type = 'button';
+      head.setAttribute('aria-expanded', String(!!open));
+      head.innerHTML = '<span class="ph-name">' + esc(PHASES[b.phase] || b.phase) + '</span>' +
+        '<span class="ph-sum">' + esc(sum.text) + '</span>' + (sum.range ? '<span class="ph-time mono">' + esc(sum.range) + '</span>' : '');
+      head.onclick = function () { if (!isCur) { opened[b.key] = !opened[b.key]; renderTimeline(true); } };
+      li.appendChild(head);
+      if (open) {
+        var ul = el('ul', 'tasks');
+        var items = b.items;
+        // A long open phase shows the tasks around now, not all of them.
+        var focus = items.findIndex(function (it) { return it.state === 'now'; });
+        if (focus < 0) focus = b.where === 'past' ? items.length - 1 : 0;
+        var from = 0, to = items.length;
+        if (!lyricsAll && !opened[b.key] && items.length > 9) { from = Math.max(0, Math.min(focus - 4, items.length - 9)); to = from + 9; }
+        if (from > 0) ul.appendChild(el('li', 'more', from + ' earlier'));
+        items.slice(from, to).forEach(function (it) {
+          var ti = el('li', 'task ' + it.state);
+          var row = el('div', 'task-row');
+          row.appendChild(el('span', 'task-text', it.text));
+          if (it.time) row.appendChild(el('span', 'task-time mono', hhmm(it.time)));
+          var btn = el('button', 'det', detailsOpen[it.key] ? 'Hide' : 'Details');
+          btn.type = 'button';
+          btn.onclick = function () { detailsOpen[it.key] = !detailsOpen[it.key]; renderTimeline(true); };
+          row.appendChild(btn);
+          ti.appendChild(row);
+          if (detailsOpen[it.key]) {
+            ti.classList.add('open');
+            var dl = el('dl', 'task-detail');
+            Object.keys(it.detail || {}).forEach(function (k) {
+              var v = it.detail[k];
+              if (v == null || v === '') return;
+              dl.appendChild(el('dt', null, k));
+              dl.appendChild(el('dd', k === 'Request' || k === 'Input' ? 'mono' : null, String(v)));
+            });
+            ti.appendChild(dl);
+          }
+          ul.appendChild(ti);
+        });
+        if (to < items.length) ul.appendChild(el('li', 'more', (items.length - to) + ' more'));
+        li.appendChild(ul);
+      }
+      if (isCur) cur = li;
       ol.appendChild(li);
     });
     if (cur && Date.now() - userScrolledAt > 6000) {
-      ol.scrollTop = cur.offsetTop - ol.clientHeight / 2 + cur.offsetHeight / 2;
+      ol.scrollTop = cur.offsetTop - ol.clientHeight / 2 + Math.min(cur.offsetHeight, ol.clientHeight * 0.6) / 2;
     }
   }
 
@@ -964,11 +1182,13 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     t.inputEl.textContent = JSON.stringify(input, null, 2);
     t.sumEl.textContent = toolSummary(t.name, input);
     var id = Object.keys(tools).find(function (k) { return tools[k] === t; });
-    if (state.running[id]) state.running[id].summary = t.sumEl.textContent;
-    if (t.name === 'TodoWrite' && input && input.todos) {
-      state.todos = input.todos;
+    if (state.running[id]) { state.running[id].summary = t.sumEl.textContent; state.running[id].input = input; }
+    // A plan: update_plan of the OpenPnP MCP server (steps), or TodoWrite where Claude Code has it (todos).
+    var plan = input && (/__update_plan$/.test(t.name) ? input.steps : t.name === 'TodoWrite' ? input.todos : null);
+    if (Array.isArray(plan)) {
+      state.todos = plan;
       var tc = t.todo || (t.todo = el('div', 'todo-card'));
-      tc.innerHTML = input.todos.map(function (x) { return '<div class="' + esc(x.status) + '">' + (x.status === 'completed' ? '☑ ' : x.status === 'in_progress' ? '▶ ' : '☐ ') + esc(x.content) + '</div>'; }).join('');
+      tc.innerHTML = plan.map(function (x) { return '<div class="' + esc(x.status) + '">' + (x.status === 'completed' ? '☑ ' : x.status === 'in_progress' ? '▶ ' : '☐ ') + esc(x.content) + '</div>'; }).join('');
       if (!tc.parentNode) t.card.parentNode.insertBefore(tc, t.card.nextSibling);
       t.card.hidden = true;
     }
@@ -991,7 +1211,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     if (imgs.length) {
       // Show images outside the folded card too, they are what the user wants to see.
       var row = el('div', 'tool-imgs');
-      imgs.forEach(function (src) { var im = el('img'); im.src = src; im.alt = '工具回傳的圖片'; row.appendChild(im); });
+      imgs.forEach(function (src) { var im = el('img'); im.src = src; im.alt = 'Image from the tool'; row.appendChild(im); });
       t.card.parentNode.insertBefore(row, t.card.nextSibling);
     }
     if (isError && texts.length) t.sumEl.textContent = texts.join(' ').slice(0, 160);
@@ -1006,7 +1226,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     var b = { type: cb.type, text: '', json: '' };
     if (cb.type === 'text') { b.el = el('div', 'msg-text'); addToLog(b.el, parent); }
     else if (cb.type === 'thinking') {
-      b.el = el('details', 'think'); b.el.innerHTML = '<summary>思考</summary><div></div>'; addToLog(b.el, parent);
+      b.el = el('details', 'think'); b.el.innerHTML = '<summary>Thinking</summary><div></div>'; addToLog(b.el, parent);
     }
     else if (cb.type === 'tool_use') { b.tool = toolCard(cb.id, cb.name, parent); b.id = cb.id; }
     blocks[key] = b;
@@ -1073,12 +1293,12 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
   function permCard(ev) {
     var card = el('div', 'perm');
     var tp = toolParts(ev.tool_name || '');
-    card.appendChild(el('div', 'q', '要讓 Claude 用「' + tp.name + '」嗎？' + (tp.srv ? '（' + tp.srv + '）' : '')));
+    card.appendChild(el('div', 'q', 'Allow Claude to use ' + tp.name + (tp.srv ? ' (' + tp.srv + ')' : '') + '?'));
     var sum = toolSummary(ev.tool_name, ev.input);
     if (sum) card.appendChild(el('div', null, sum));
     var pre = el('pre'); pre.textContent = JSON.stringify(ev.input, null, 2); card.appendChild(pre);
     var row = el('div', 'row');
-    var yes = el('button', 'btn human', '核准'), no = el('button', 'btn danger', '拒絕');
+    var yes = el('button', 'btn human', 'Allow'), no = el('button', 'btn danger', 'Deny');
     yes.type = no.type = 'button';
     yes.onclick = function () { answerPerm(ev.request_id, true); };
     no.onclick = function () { answerPerm(ev.request_id, false); };
@@ -1095,11 +1315,11 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     var card = perms[id];
     if (!card) return;
     card.classList.add('answered');
-    card.appendChild(el('div', 'note', note || (allow ? '已核准' : '已拒絕')));
+    card.appendChild(el('div', 'note', note || (allow ? 'Allowed' : 'Denied')));
   }
   function addUser(text, images) {
     var d = el('div', 'msg-user', text);
-    (images || []).forEach(function (im) { var i = el('img'); i.src = 'data:' + im.media_type + ';base64,' + im.data; i.alt = '附上的圖片'; d.appendChild(i); });
+    (images || []).forEach(function (im) { var i = el('img'); i.src = 'data:' + im.media_type + ';base64,' + im.data; i.alt = 'Attached image'; d.appendChild(i); });
     stick = true;
     addToLog(d);
   }
@@ -1117,7 +1337,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
       case 'result':
         setBusy(false);
         state.running = {};
-        log.appendChild(el('div', 'turn-end', (ev.is_error ? '出錯 · ' : '完成 · ') + ((ev.duration_ms || 0) / 1000).toFixed(1) + ' 秒' + (ev.num_turns ? ' · ' + ev.num_turns + ' 輪' : '')));
+        log.appendChild(el('div', 'turn-end', (ev.is_error ? 'Error · ' : 'Done · ') + ((ev.duration_ms || 0) / 1000).toFixed(1) + ' s' + (ev.num_turns ? ' · ' + ev.num_turns + (ev.num_turns === 1 ? ' turn' : ' turns') : '')));
         renderTimeline(); scrollDown();
         break;
       case 'system':
@@ -1125,11 +1345,12 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
         break;
       case 'ui':
         if (ev.subtype === 'user_text') { addUser(ev.text, ev.images); setBusy(true); }
-        else if (ev.subtype === 'permission') { if (!(ev.request_id in perms)) permCard(ev); }
-        else if (ev.subtype === 'permission_answer') markPerm(ev.request_id, ev.allow, ev.auto ? '自動核准' : null);
+        // update_plan is always approved by the server; no card for it.
+        else if (ev.subtype === 'permission') { if (!(ev.request_id in perms) && !/__update_plan$/.test(ev.tool_name || '')) permCard(ev); }
+        else if (ev.subtype === 'permission_answer') markPerm(ev.request_id, ev.allow, ev.auto ? 'Auto-approved' : null);
         else if (ev.subtype === 'reset') clearChat();
-        else if (ev.subtype === 'exited') { setBusy(false); addToLog(el('div', 'note', 'Claude 已結束。下次送出訊息時會接續同一段對話。')); }
-        else if (ev.subtype === 'stderr' && /error|Error|錯誤/.test(ev.text)) addToLog(el('div', 'note err', ev.text.slice(0, 400)));
+        else if (ev.subtype === 'exited') { setBusy(false); addToLog(el('div', 'note', 'Claude stopped. Your next message continues the same conversation.')); }
+        else if (ev.subtype === 'stderr' && /error/i.test(ev.text)) addToLog(el('div', 'note err', ev.text.slice(0, 400)));
         break;
     }
   }
@@ -1144,14 +1365,14 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
   }
   function setBusy(b) {
     $('stop').hidden = !b;
-    $('send').textContent = b ? '追加' : '送出';
+    $('send').textContent = b ? 'Add' : 'Send';
   }
 
   var attachments = [];
   function renderAttach() {
     var a = $('attach'); a.innerHTML = '';
     attachments.forEach(function (im, i) {
-      var img = el('img'); img.src = 'data:' + im.media_type + ';base64,' + im.data; img.alt = '要附上的圖片'; img.title = '點一下移除';
+      var img = el('img'); img.src = 'data:' + im.media_type + ';base64,' + im.data; img.alt = 'Image to attach'; img.title = 'Click to remove';
       img.onclick = function () { attachments.splice(i, 1); renderAttach(); };
       a.appendChild(img);
     });
@@ -1166,7 +1387,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
         fr.onload = function () { attachments.push({ media_type: 'image/jpeg', data: String(fr.result).split(',')[1] }); renderAttach(); };
         fr.readAsDataURL(blob);
       })
-      .catch(function () { addToLog(el('div', 'note err', '拿不到相機畫面。')); });
+      .catch(function () { addToLog(el('div', 'note err', 'Could not get a camera image.')); });
   };
   function send() {
     var t = $('input'), text = t.value.trim();
@@ -1174,7 +1395,7 @@ details.think div { white-space: pre-wrap; padding: 4px 0 0 12px; }
     var imgs = attachments.slice();
     t.value = ''; attachments = []; renderAttach();
     postJSON('/api/chat/send', { text: text, images: imgs }).then(function (r) {
-      if (r.status !== 'ok') addToLog(el('div', 'note err', r.error || '送不出去'));
+      if (r.status !== 'ok') addToLog(el('div', 'note err', r.error || 'Could not send'));
     });
   }
   $('send').onclick = send;

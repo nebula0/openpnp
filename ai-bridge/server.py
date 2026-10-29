@@ -656,5 +656,26 @@ def get_bed_map(
     return _with_images(_call("GET", "/bedmap", query))
 
 
+@mcp.tool()
+def update_plan(steps: list[dict]) -> str:
+    """Show the plan for the current work on the web UI's task timeline. Does not move the machine.
+
+    steps: the whole plan, in order, every time: [{"content": "Scan QR feeders",
+    "status": "pending" | "in_progress" | "completed"}]. Keep one step in_progress while working
+    on it and call again whenever a step starts or finishes. The UI groups steps into phases by
+    their wording (setup/home/calibrate, feeders/QR/probe, vision, fiducials, place, inspect,
+    rework), so name each step after what it does.
+    """
+    allowed = {"pending", "in_progress", "completed"}
+    plan = []
+    for step in steps:
+        content = str(step.get("content", "")).strip()
+        status = step.get("status", "pending")
+        if not content:
+            continue
+        plan.append({"content": content, "status": status if status in allowed else "pending"})
+    return json.dumps({"status": "ok", "steps": len(plan)}, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     mcp.run()
