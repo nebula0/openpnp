@@ -115,7 +115,7 @@ body.idle { cursor: default; }
   var DUR = 8.5;
 
   // Tasks from "YC Demo 影片腳本 v1", shortened. AI runs the scripts and checks their results;
-  // the human keeps design, results, and moving things. owner: ai / human.
+  // the human sets the goal, allows each move and checks the result (2026-10-29 storyboard). owner: ai / human.
   var CARDS = [
     { t: "Calibrate nozzle", o: "ai" },
     { t: "Check vacuum", o: "ai" },
@@ -135,15 +135,15 @@ body.idle { cursor: default; }
     { t: "Rework misplaced parts", o: "ai" },
     { t: "Search past fixes", o: "ai" },
     { t: "Final check", o: "ai" },
-    { t: "Design the board", o: "human" },
-    { t: "Approve the result", o: "human" },
-    { t: "Load parts & boards", o: "human" }
+    { t: "Set the goal", o: "human" },
+    { t: "Allow the move", o: "human" },
+    { t: "Check the result", o: "human" }
   ];
 
   var params = new URLSearchParams(location.search);
   var SUBS = params.get("subs") === "1";
-  var SUB1 = "Every one of these needs a person.";
-  var SUB2 = "AI checks the work. You check three.";
+  var SUB1 = "Before: dozens of tasks to manage.";
+  var SUB2 = "Now: just three.";
 
   // ---------- colors ----------
   function hex(h) { return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)]; }
