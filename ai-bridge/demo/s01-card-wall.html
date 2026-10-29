@@ -134,6 +134,7 @@ body.idle { cursor: default; }
     { t: "Fix wrong settings", o: "ai" },
     { t: "Rework misplaced parts", o: "ai" },
     { t: "Search past fixes", o: "ai" },
+    { t: "Final check", o: "ai" },
     { t: "Design the board", o: "human" },
     { t: "Approve the result", o: "human" },
     { t: "Load parts & boards", o: "human" }
@@ -177,19 +178,20 @@ body.idle { cursor: default; }
   var STK0 = { x: 960 - 190, y: 542 }, STK1 = { x: 1420, y: TOP };
 
   // Timeline (s): cards in 0.15..1.6, pile 2.5..3.1, panels 3.0..3.8, deal 3.85..5.5, humans spread 5.5..6.1,
-  // AI ticks 5.6..6.6, focus 6.7..7.4.
-  var T = { pile: 2.5, panel: 3.0, side: 3.25, deal: 3.85, spread: 5.5, tick: 5.6, focus: 6.7, product: 8.0 };
+  // AI ticks 5.6..6.5, then "Final check" after a beat (6.7), focus 7.0..7.7.
+  var T = { pile: 2.5, panel: 3.0, side: 3.25, deal: 3.85, spread: 5.5, tick: 5.6, focus: 7.0, product: 8.3 };
 
   var idx = { ai: 0, human: 0 }, deal = 0;
   CARDS.forEach(function (c, i) {
     var k = idx[c.o]++;
-    c.g = { x: 160 + (i % 4) * (382 + 24), y: TOP + Math.floor(i / 4) * (116 + 20), w: 382, h: 116, f: 31 };
-    c.c0 = tone("human", Math.floor(i / 4), 5);
+    // starting wall: 3 columns x 7 rows
+    c.g = { x: 160 + (i % 3) * (517 + 24), y: TOP + Math.floor(i / 3) * (82 + 14), w: 517, h: 82, f: 30 };
+    c.c0 = tone("human", Math.floor(i / 3), 7);
     if (c.o === "ai") {
       // 3 columns x 6 rows, filled column by column
       c.fin = { x: 116 + Math.floor(k / 6) * (382 + 21), y: TOP + (k % 6) * (96 + 16), w: 382, h: 96, f: 27 };
       c.c1 = tone("ai", k % 6, 6);
-      c.tt = T.tick + k * 0.055;
+      c.tt = c.t === "Final check" ? T.tick + 1.1 : T.tick + k * 0.05;
     } else {
       c.fin = { x: 1416, y: TOP + k * (160 + 24), w: 388, h: 160, f: 38 };
       c.c1 = tone("human", k, 3);
@@ -321,7 +323,7 @@ body.idle { cursor: default; }
       c.lb.style.color = rgb(txt);
     });
 
-    var hv = t < T.deal ? shown : 20 - landed;
+    var hv = t < T.deal ? shown : CARDS.length - landed;
     setCount("human", hv, t);
     setCount("ai", landed, t);
     N.human.classList.toggle("drop", t >= T.deal && hv < 20);
