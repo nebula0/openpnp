@@ -89,6 +89,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 - [x] `ai-bridge/ui_server.py`：靜態檔、轉接、actions.jsonl、對話（claude CLI、SSE、核准、中斷、新對話、附圖）
 - [x] `ai-bridge/ui/index.html`：版面、相機、板子圖（縮放拖曳、hover、點選）、元件列表（可收合、篩選、點選連動板子、雙擊帶入對話）、Task 時間軸、對話視窗
 - [x] 接模擬機跑過介面（10/29，Edge 無頭截圖）：狀態列、板子圖、Task 時間軸置中、對話串流、工具卡片、核准按鈕 → 允許 → 工具結果 → 回覆，都正常
+- [x] 外觀改成 Ubuntu（GNOME／Yaru）風格（10/29，使用者指定）：紫紅桌布上的圓角視窗；左側欄放機器狀態、可收合的元件列表和 job 名稱；頂端搜尋框篩選零件；Ubuntu 橘＝現在／選取／要人決定，綠＝已完成；跟著系統切換淺色和深色
 - [ ] **打包**：OpenPnP 關閉時 `mvn package`，之後用 `start-openpnp.bat` 開的 OpenPnP 才有 view server。10/29 寫完時真機 OpenPnP 正在被另一個工作階段使用，所以還沒打包
 - [ ] 在一般瀏覽器確認 MJPEG 相機串流（無頭 Edge 不畫 MJPEG；`?poll=1` 改抓單張的模式已確認正常）
 - [ ] todo 同步到 Task 時間軸（程式寫了，還沒有實際讓 Claude 用 TodoWrite 測過）
