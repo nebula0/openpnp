@@ -6,7 +6,8 @@
 /* Layout: fixed 1920x1080 stage, letterboxed. Planner checklist look: white list cards in clear sleeves,
    letter-spaced typewriter titles, pastel task rows shaded light-deep-light down each list, a checkbox per
    row. Every task starts in the Human list (light orange); dealt tasks turn blue in the AI list, then
-   AI ticks them one by one; the three left for the human turn solid orange. Single committed light look. */
+   AI ticks them one by one and ends on Final check; the three human tasks stay unticked.
+   Single committed light look. */
 :root {
   color-scheme: light;
   --ground: #dedcd8;
@@ -111,7 +112,7 @@ body.idle { cursor: default; }
 <script>
 (function () {
   "use strict";
-  var DUR = 10;
+  var DUR = 8.5;
 
   // Tasks from "YC Demo 影片腳本 v1", shortened. AI runs the scripts and checks their results;
   // the human keeps design, results, and moving things. owner: ai / human.
@@ -177,8 +178,8 @@ body.idle { cursor: default; }
   var STK0 = { x: 960 - 190, y: 542 }, STK1 = { x: 1420, y: TOP };
 
   // Timeline (s): cards in 0.15..1.6, pile 2.5..3.1, panels 3.0..3.8, deal 3.85..5.5, humans spread 5.5..6.1,
-  // AI ticks 5.6..6.5, then "Final check" after a beat (6.7), focus 7.0..7.7.
-  var T = { pile: 2.5, panel: 3.0, side: 3.25, deal: 3.85, spread: 5.5, tick: 5.6, focus: 7.0, product: 8.3 };
+  // AI ticks 5.6..6.5, then "Final check" after a beat (6.7); the animation holds on that frame.
+  var T = { pile: 2.5, panel: 3.0, side: 3.25, deal: 3.85, spread: 5.5, tick: 5.6, done: 7.0, product: 7.3 };
 
   var idx = { ai: 0, human: 0 }, deal = 0;
   CARDS.forEach(function (c, i) {
@@ -228,8 +229,6 @@ body.idle { cursor: default; }
   var stage = $("stage"), help = $("help"), product = $("product"), subs = $("subs");
   var P = { human: $("p-human"), ai: $("p-ai") };
   var N = { human: $("n-human"), ai: $("n-ai") };
-  var HD = {};
-  ["human", "ai"].forEach(function (k) { HD[k] = { ttl: P[k].querySelector(".ttl"), hd: P[k].querySelector(".hd") }; });
   var nameParam = params.get("name");
   if (nameParam) product.textContent = nameParam;
 
@@ -264,13 +263,10 @@ body.idle { cursor: default; }
   function render(t) {
     var pm = eIO((t - T.panel) / 0.8);
     var side = eOut((t - T.side) / 0.55);
-    var focus = eIO((t - T.focus) / 0.7);
 
     var hr = lerpR(BIG, FIN.human, pm);
-    setPanel(P.human, hr, 1, 0, ", 0 0 0 " + (15 + 4 * focus).toFixed(2) + "px " + rgba(C.human, 0.5 * focus) +
-      ", 0 0 70px " + rgba(C.human, 0.22 * focus));
-    setPanel(P.ai, FIN.ai, side, -70 * (1 - side), ", 0 0 0 " + (15 + 4 * focus).toFixed(2) + "px " + rgba(DEEP.ai, 0.5 * focus) +
-      ", 0 0 70px " + rgba(DEEP.ai, 0.22 * focus));
+    setPanel(P.human, hr, 1, 0);
+    setPanel(P.ai, FIN.ai, side, -70 * (1 - side));
 
     var sp = { x: lerp(STK0.x, STK1.x, pm), y: lerp(STK0.y, STK1.y, pm) };
     var shown = 0, landed = 0;
@@ -300,11 +296,8 @@ body.idle { cursor: default; }
       var z = flying ? 200 + (c.o === "human" ? 0 : NDEAL - c.dj) : sP >= 1 && ed < 1 ? 20 + c.lvl : 10 + i;
       if (sP >= 1 && d >= 1) z = 10 + i;
 
-      var bg = mix(c.c0, c.c1, ed), txt = C.ink, op = ea;
-      if (c.o === "human") {
-        bg = mix(bg, C.human, focus); txt = mix(C.ink, C.white, focus);
-      } else {
-        bg = mix(bg, DEEP.ai, focus); txt = mix(C.ink, C.white, focus);
+      var bg = mix(c.c0, c.c1, ed), op = ea;
+      if (c.o !== "human") {
         // AI checks each result after the deal: tick draws in, card gives a small nudge
         var tk = clamp((t - c.tt) / 0.22);
         c.tick.style.strokeDashoffset = (24 * (1 - eOut(tk))).toFixed(2);
@@ -319,32 +312,21 @@ body.idle { cursor: default; }
       st.opacity = op.toFixed(3);
       st.zIndex = z;
       st.boxShadow = "inset 0 1px 0 rgba(255,255,255,0.55), 0 " +
-        (2 + 16 * lift).toFixed(1) + "px " + (6 + 26 * lift).toFixed(1) + "px -6px rgba(38,34,31," + (0.16 + 0.2 * lift).toFixed(3) + ")" +
-        ", 0 0 0 " + (2.5 * focus).toFixed(2) + "px " + rgba(mix(c.o === "human" ? C.human : DEEP.ai, C.ink, 0.25), focus) +
-        ", 0 10px 30px -8px " + rgba(c.o === "human" ? C.human : DEEP.ai, 0.5 * focus);
-      c.lb.style.color = rgb(txt);
+        (2 + 16 * lift).toFixed(1) + "px " + (6 + 26 * lift).toFixed(1) + "px -6px rgba(38,34,31," + (0.16 + 0.2 * lift).toFixed(3) + ")";
+      c.lb.style.color = rgb(C.ink);
     });
 
     var hv = t < T.deal ? shown : CARDS.length - landed;
     setCount("human", hv, t);
     setCount("ai", landed, t);
-    N.human.classList.toggle("drop", t >= T.deal && hv < 20);
-    // final light-up: titles, header rules, frames, counters and cards change color on the same focus curve
-    [["human", C.human], ["ai", DEEP.ai]].forEach(function (p) {
-      var col = rgb(mix(C.ink, p[1], focus));
-      HD[p[0]].ttl.style.color = col;
-      HD[p[0]].ttl.style.webkitTextStroke = "0.8px " + col;
-      HD[p[0]].hd.style.borderBottomColor = col;
-      P[p[0]].style.outline = (5 * focus).toFixed(2) + "px solid " + rgba(p[1], focus);
-    });
-    N.ai.style.color = rgb(mix(C.ink, DEEP.ai, focus));
+    N.human.classList.toggle("drop", t >= T.deal && hv < CARDS.length);
 
     var pn = nameParam ? eOut((t - T.product) / 0.7) : 0;
     product.style.opacity = pn.toFixed(3);
     product.style.transform = "translateY(" + ((1 - pn) * 12).toFixed(1) + "px)";
     if (SUBS) {
       var s1 = eOut((t - 0.8) / 0.4) * (1 - eOut((t - T.pile) / 0.3));
-      var s2 = eOut((t - T.focus) / 0.5) * (nameParam ? 1 - eOut((t - T.product + 0.3) / 0.3) : 1);
+      var s2 = eOut((t - T.done) / 0.5) * (nameParam ? 1 - eOut((t - T.product + 0.3) / 0.3) : 1);
       subs.textContent = t < T.panel ? SUB1 : SUB2;
       subs.style.opacity = (t < T.panel ? s1 : s2).toFixed(3);
     } else subs.style.opacity = "0";
