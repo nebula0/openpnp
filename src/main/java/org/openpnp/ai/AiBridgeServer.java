@@ -228,8 +228,20 @@ public class AiBridgeServer {
         }));
         server.start();
 
+        // Read-only views (camera frames, job layout) for the web UI, on their own threads so
+        // that they keep working while a long machine task holds the server above.
+        Integer viewPort = null;
+        try {
+            new AiBridgeViewServer(this, token, port + 1);
+            viewPort = port + 1;
+        }
+        catch (Exception e) {
+            Logger.warn(e, "AI bridge view server failed to start on port {}", port + 1);
+        }
+
         JsonObject info = new JsonObject();
         info.addProperty("port", port);
+        info.addProperty("viewPort", viewPort);
         info.addProperty("token", token);
         Files.write(new File(bridgeDirectory, "bridge.json").toPath(),
                 gson.toJson(info)
@@ -355,7 +367,7 @@ public class AiBridgeServer {
     // Read-only endpoints
     // ---------------------------------------------------------------------------------------
 
-    private JsonObject getStatus() throws Exception {
+    JsonObject getStatus() throws Exception {
         Machine machine = Configuration.get()
                                        .getMachine();
         JsonObject o = ok();
@@ -410,7 +422,7 @@ public class AiBridgeServer {
         return o;
     }
 
-    private JsonObject getNozzles() throws Exception {
+    JsonObject getNozzles() throws Exception {
         Machine machine = Configuration.get()
                                        .getMachine();
         Nozzle selected = onSwing(() -> MainFrame.get()
@@ -3968,7 +3980,7 @@ public class AiBridgeServer {
                 feeders.length() == 0 ? "none" : feeders);
     }
 
-    private static Job loadJob(String file) throws Exception {
+    static Job loadJob(String file) throws Exception {
         if (file == null || file.trim()
                                 .isEmpty()) {
             throw new BadRequest("Give the job file.");
@@ -4424,7 +4436,7 @@ public class AiBridgeServer {
         }
     }
 
-    private static <T> T onSwing(Callable<T> callable) throws Exception {
+    static <T> T onSwing(Callable<T> callable) throws Exception {
         if (SwingUtilities.isEventDispatchThread()) {
             return callable.call();
         }
@@ -4582,7 +4594,7 @@ public class AiBridgeServer {
         }
     }
 
-    private static Map<String, String> parseQuery(String rawQuery) throws IOException {
+    static Map<String, String> parseQuery(String rawQuery) throws IOException {
         Map<String, String> map = new HashMap<>();
         if (rawQuery == null) {
             return map;
@@ -4611,7 +4623,7 @@ public class AiBridgeServer {
         return e == null || e.isJsonNull() ? defaultValue : e.getAsBoolean();
     }
 
-    private static JsonElement toJson(Location l) {
+    static JsonElement toJson(Location l) {
         if (l == null) {
             return null;
         }
@@ -4650,7 +4662,7 @@ public class AiBridgeServer {
                                   .getShortName());
     }
 
-    private static double round(double v) {
+    static double round(double v) {
         return Math.round(v * 1000.0) / 1000.0;
     }
 
@@ -4686,27 +4698,27 @@ public class AiBridgeServer {
                  .toLowerCase(Locale.ROOT);
     }
 
-    private static String describe(Throwable e) {
+    static String describe(Throwable e) {
         String message = e.getMessage();
         return e.getClass()
                 .getSimpleName()
                 + (message == null ? "" : ": " + message);
     }
 
-    private static JsonObject ok() {
+    static JsonObject ok() {
         JsonObject o = new JsonObject();
         o.addProperty("status", "ok");
         return o;
     }
 
-    private static JsonObject error(String message) {
+    static JsonObject error(String message) {
         JsonObject o = new JsonObject();
         o.addProperty("status", "error");
         o.addProperty("error", message);
         return o;
     }
 
-    private static class BadRequest extends Exception {
+    static class BadRequest extends Exception {
         BadRequest(String message) {
             super(message);
         }
