@@ -50,6 +50,12 @@
 - 先試：先拍取料點，確認零件還在、XY 有對準。再跑 `probe_feeder_z`（不用 apply），用 `update_feeder` 把 Z 設成 **contactZ − 0.15**。0.05 不夠：直接放在平台上的料帶不平，沿料帶每 8 mm 會差約 0.1 mm（10/22 的 330ohm：Y 300 在 7.45，Y 292 在 7.35）。吸嘴有彈簧，多壓 0.15 沒問題（10/22 用 −0.15 後，11 顆連續成功）。上膜沒撕也是同樣的症狀，兩個都要檢查。
 - 注意：`scan_qr_feeders` 會沿用 feeder 原本的 Z，不會重量。料帶重新放過之後，最好每條都跑一次 `probe_feeder_z`。10/22 料帶架上的三條，Z 都和存的值差 0.05–0.2 mm。
 
+- **注意（10/29，使用者）**：量 Z 的時候，零件常常在吸嘴還沒碰到時就被隔空吸起，所以 `contactZ` 比零件真正的高度高。10/29 照 contact − 0.15 改：47kΩ 用 7.2 吸不到，改回原本的 6.95（contact − 0.4）就好了；330Ω 用 7.45（contact − 0.15）連續成功 4 顆。不確定時，用之前試吸成功過的 Z。
+
+### `update_feeder` 改了 Z 之後，馬上 `No part vacuum-detected after pick`
+- 原因（10/29）：`update_feeder` 改 strip feeder 的 Z 時，送料計數也被重設，回到第一格。那一格如果已經用掉（例如剛才試吸過），就會一直吸到空格。拍照可以看到取料點那幾格是空的。
+- 先試：改完 Z 再跑一次 `scan_qr_feeders(apply=true)`，它會保留新的 Z，並跳到第一顆有料的口袋。程式待修（見 ROADMAP 第 3 節）。
+
 ### 第一顆放得好好的，第二顆 `No part vacuum-detected after pick`
 - 原因（10/22，100nF）：掃描找到的「第一顆」其實是之前 `pick_from_feeder` 試吸後放回去的那顆，它後面都是空口袋。掃描只要看到有零件就停，不會管後面是不是空的。
 - 先試：拍取料點附近的照片確認。重跑 `scan_qr_feeders`（apply），它會跳過已經空掉的口袋，找到下一段有料的地方。試吸時用 `return_part=false` 再丟掉，就不會留下單獨一顆。
@@ -119,7 +125,8 @@
 
 ### `place_from_job`：`skipped: A part seems to be there already`，焊墊其實是空的
 - 原因（10/29）：空板照片是換板子之前拍的，跟現在這片板子不一樣（Brd2 R5：變化 3.04 mm²）。
-- 先試：用 `move_camera` 加 `capture_camera` 確認焊墊是空的，再對那幾個 placement 跑一次 `survey_bare_boards`，然後重新放。換上新板子後，記得先跑 `survey_bare_boards`。
+- 先試：用 `move_camera` 加 `capture_camera` 確認焊墊是空的，再對那幾個 placement 跑一次 `survey_bare_boards`，然後重新放。換上新板子後，記得先跑 `survey_bare_boards`；**刷完錫膏也要重拍**。
+- 另一個原因（10/29）：同一批放料中，**旁邊 2–3 mm 內剛放了零件**，畫面就變了（0.3–1.7 mm²），一次有 10 顆被跳過。分批放的話，每一批開始前，先對還沒放的 placement 重拍空板照片。程式待修（見 ROADMAP 第 3 節）。
 
 ### 放料時把旁邊已經放好的高零件撞歪
 - 原因：放料順序反了。吸嘴頭越往上越粗，放矮零件時會擦到旁邊比較高的零件（10/14：1uF 撞到 AD608）。
