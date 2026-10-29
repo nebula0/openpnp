@@ -90,12 +90,12 @@ claude -p --input-format stream-json --output-format stream-json --verbose
 - [x] `ai-bridge/ui/index.html`：版面、相機、板子圖（縮放拖曳、hover、點選）、元件列表（可收合、篩選、點選連動板子、雙擊帶入對話）、Task 時間軸、對話視窗
 - [x] 接模擬機跑過介面（10/29，Edge 無頭截圖）：狀態列、板子圖、Task 時間軸置中、對話串流、工具卡片、核准按鈕 → 允許 → 工具結果 → 回覆，都正常
 - [x] 外觀改成 Ubuntu（GNOME／Yaru）風格（10/29，使用者指定）：紫紅桌布上的圓角視窗；左側欄放機器狀態、可收合的元件列表和 job 名稱；頂端搜尋框篩選零件；Ubuntu 橘＝現在／選取／要人決定，綠＝已完成；跟著系統切換淺色和深色
-- [ ] **打包**：OpenPnP 關閉時 `mvn package`，之後用 `start-openpnp.bat` 開的 OpenPnP 才有 view server。10/29 寫完時真機 OpenPnP 正在被另一個工作階段使用，所以還沒打包
+- [x] 打包（10/29 21:21，`mvn package`）。真機用 `start-openpnp.bat` 開啟後 `bridge.json` 有 `viewPort: 9000`；介面接真機：狀態、兩台相機的真實畫面、fm_pnp 的 4 塊板子和 footprint、元件 4/60 已放、Task 時間軸都正常（無頭 Edge 截圖，`?poll=1`）
 - [ ] 在一般瀏覽器確認 MJPEG 相機串流（無頭 Edge 不畫 MJPEG；`?poll=1` 改抓單張的模式已確認正常）
 - [x] 計畫同步到 Task 時間軸（10/29，讓 Claude 呼叫 `update_plan` 實測過）
 - [x] Task 時間軸改成兩層（10/29，使用者要求）：第一層是階段（Setup、Feeders、Vision、Boards、Place、Inspect、Rework、Plan、Machine），第二層是 task。過去的階段來自動作紀錄，同一種動作連續出現就併在一起；`nozzle/discard`、`camera/move` 歸到當時所在的階段。現在的階段是正在跑的機器工具，或計畫裡 in_progress 的那一步（依字詞判斷階段，見 `phaseOfText`）。之後的階段是計畫裡 pending 的步驟，沒有計畫時是 job 裡還沒放的零件。只有現在的階段展開並高亮；點收合的階段可以暫時打開；「Expand all」全部打開。每個 task 只顯示短標籤，hover 出現 Details 按鈕，按了顯示時間、原因、結果和參數
 - [x] 介面文字改成英文（10/29）。對 Claude 的系統提示也改成英文，請它用使用者的語言回覆
-- [ ] 真機測試
+- [ ] 真機測試：用介面的對話實際操作一次（例如讓 Claude 歸零、掃 QR），確認核准按鈕和時間軸的「現在」
 - [ ] 第三階段
 
 ### 已知問題與注意事項
